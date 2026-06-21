@@ -1,0 +1,32 @@
+[package]
+name = "rust-thread-pool-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "A from-scratch work-stealing thread pool runtime in Rust with priorities, cancellation, and dependency scheduling."
+license = "MIT"
+repository = "https://github.com/czhao-dev/thread-pool-runtime"
+readme = "README.md"
+keywords = ["thread-pool", "work-stealing", "concurrency", "scheduler", "runtime"]
+categories = ["concurrency", "asynchronous"]
+
+[lib]
+name = "rust_thread_pool_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+crossbeam-deque = "0.8"
+crossbeam-utils = "0.8"
+num_cpus = "1.16"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
+
+[[bench]]
+name = "scheduler_bench"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
