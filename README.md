@@ -7,7 +7,7 @@
 
 A from-scratch task execution runtime written in Rust: a fixed-size worker pool with per-priority work-stealing queues, panic-safe task handles, cooperative cancellation, and a dependency-graph (DAG) scheduler built on top of it.
 
-The goal is not to replace mature libraries such as Rayon or Tokio. It's a learning-focused implementation of the mechanisms behind CPU task runtimes, job schedulers, and work-stealing execution engines — built to be read, benchmarked, and reasoned about.
+This is not meant to replace mature libraries such as Rayon or Tokio. It's a learning-focused implementation of the mechanisms behind CPU task runtimes, job schedulers, and work-stealing execution engines — built to be read, benchmarked, and reasoned about.
 
 ## Overview
 
@@ -58,7 +58,7 @@ Each priority level (`High`, `Normal`, `Background`) gets its own independent se
 2. **Global injectors** — `steal_batch_and_pop` from each priority's injector in turn. This both grabs a task to run *and* moves a batch of further tasks into the worker's own local deque, which is what gives later iterations cache-friendly, contention-free access to that work.
 3. **Peer workers** — `steal()` a single task directly from another worker's local deque, again in priority order, skipping itself.
 
-This three-stage search is the standard shape of a work-stealing scheduler (the same one Rayon and Tokio's multi-threaded scheduler are built on): workers are almost always running off their own queue, batches absorbed from the injector amortize the cost of going to shared state, and direct peer-stealing is the fallback that keeps a pool from idling while work sits unevenly distributed on another worker. Running 50,000 trivial tasks across 8 workers, **24% of tasks (12,021 of 50,000) were picked up via a direct peer steal** rather than a local pop or injector pull — concrete evidence the steal path isn't just theoretical, it's load-bearing under real submission patterns.
+This three-stage search is the standard shape of a work-stealing scheduler — the same one Rayon and Tokio's multi-threaded scheduler are built on: workers run almost entirely off their own queue, batches absorbed from the injector amortize the cost of going to shared state, and direct peer-stealing is the fallback that keeps a pool from idling while work sits unevenly distributed on another worker. Running 50,000 trivial tasks across 8 workers, **24% of tasks (12,021 of 50,000) were picked up via a direct peer steal** rather than a local pop or injector pull — concrete evidence the steal path isn't just theoretical, it's load-bearing under real submission patterns.
 
 An idle worker doesn't spin: it waits on a `Condvar`-based doorbell (`IdleSignal`) that every push and every task completion notifies, with a 1ms timeout as a correctness fallback in case a wakeup is ever missed — this bounds worst-case scheduling latency without busy-polling.
 
@@ -184,6 +184,25 @@ rust-thread-pool-runtime/
 * trait bounds for type-erased task closures (`Box<dyn FnOnce() + Send + 'static>`)
 * dynamic typing via `Box<dyn Any + Send>` and downcasting
 * benchmarking with `criterion`
+
+## References
+
+**Foundational papers**
+
+- Blumofe, R. D. & Leiserson, C. E. (1999). Scheduling multithreaded computations by work stealing. *Journal of the ACM*, 46(5), 720–748. <https://dl.acm.org/doi/10.1145/324133.324234>
+- Chase, D. & Lev, Y. (2005). Dynamic circular work-stealing deque. *Proceedings of the 17th Annual ACM Symposium on Parallelism in Algorithms and Architectures (SPAA '05)*, 21–28. <https://dl.acm.org/doi/10.1145/1073970.1073974>
+
+**Crates**
+
+- [`crossbeam-deque`](https://docs.rs/crossbeam-deque) — lock-free work-stealing deque; the scheduling primitive this runtime is built on.
+- [`criterion`](https://bheisler.github.io/criterion.rs/book/) — statistics-driven micro-benchmarking for Rust.
+- [Rayon](https://github.com/rayon-rs/rayon) — production data-parallelism library for Rust; a reference point for work-stealing design at scale.
+- [Tokio](https://tokio.rs) — async runtime for Rust; its multi-threaded scheduler uses the same work-stealing architecture.
+
+**Rust references**
+
+- [The Rust Programming Language](https://doc.rust-lang.org/book/) — authoritative guide to ownership, `Send`/`Sync`, and concurrency primitives.
+- [The Rustonomicon](https://doc.rust-lang.org/nomicon/) — the unsafe Rust guide; covers `catch_unwind`, `AssertUnwindSafe`, and the soundness requirements relevant to panic-safe task execution.
 
 ## License
 
