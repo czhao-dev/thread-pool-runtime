@@ -73,7 +73,7 @@ fn discover_finds_a_makefile() {
     // macOS) this also satisfies the "Makefile" lookup, so we only assert
     // discovery succeeds, not which exact casing matched.
     let dir = std::env::temp_dir().join(format!(
-        "minimake-parser-test-{}-{}",
+        "buildgraph-parser-test-{}-{}",
         std::process::id(),
         line!()
     ));
@@ -89,7 +89,7 @@ fn discover_finds_a_makefile() {
 #[test]
 fn discover_returns_none_when_absent() {
     let dir = std::env::temp_dir().join(format!(
-        "minimake-parser-test-empty-{}-{}",
+        "buildgraph-parser-test-empty-{}-{}",
         std::process::id(),
         line!()
     ));

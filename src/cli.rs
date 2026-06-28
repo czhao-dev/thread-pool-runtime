@@ -1,4 +1,4 @@
-//! Hand-rolled command-line parsing for the `minimake` binary: just enough
+//! Hand-rolled command-line parsing for the `buildgraph` binary: just enough
 //! flags for the "Core" feature set (`-j`, `-k`, target names). `-n` and
 //! `-f` are recognized only so they can be rejected with a clear "not yet
 //! supported" message instead of being silently misread as target names.

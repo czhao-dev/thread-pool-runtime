@@ -1,6 +1,6 @@
-//! `minimake`: a mini GNU Make clone built on the work-stealing scheduler
-//! in this crate. See the README for supported / not-yet-supported
-//! features.
+//! `buildgraph`: a dependency-graph build tool, supporting a subset of
+//! Makefile syntax and semantics, built on the work-stealing scheduler in
+//! this crate. See the README for supported / not-yet-supported features.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -22,7 +22,7 @@ fn main() -> ExitCode {
 }
 
 fn usage_error(e: CliError) -> ExitCode {
-    eprintln!("minimake: {e}");
+    eprintln!("buildgraph: {e}");
     ExitCode::from(2)
 }
 
@@ -31,14 +31,17 @@ fn usage_error(e: CliError) -> ExitCode {
 /// dependency), 2 a usage/parse/plan error.
 fn run(args: &cli::Args, cwd: &Path) -> i32 {
     let Some(makefile_path) = makefile::discover(cwd) else {
-        eprintln!("minimake: no makefile found in {}", cwd.display());
+        eprintln!("buildgraph: no makefile found in {}", cwd.display());
         return 2;
     };
 
     let text = match std::fs::read_to_string(&makefile_path) {
         Ok(text) => text,
         Err(e) => {
-            eprintln!("minimake: failed to read {}: {e}", makefile_path.display());
+            eprintln!(
+                "buildgraph: failed to read {}: {e}",
+                makefile_path.display()
+            );
             return 2;
         }
     };
@@ -46,7 +49,7 @@ fn run(args: &cli::Args, cwd: &Path) -> i32 {
     let parsed = match makefile::parse(&text) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("minimake: {}: {e}", makefile_path.display());
+            eprintln!("buildgraph: {}: {e}", makefile_path.display());
             return 2;
         }
     };
@@ -56,14 +59,14 @@ fn run(args: &cli::Args, cwd: &Path) -> i32 {
     } else if let Some(goal) = parsed.default_goal() {
         vec![goal.to_string()]
     } else {
-        eprintln!("minimake: no targets specified and no default goal in makefile");
+        eprintln!("buildgraph: no targets specified and no default goal in makefile");
         return 2;
     };
 
     let (graph, goal_ids) = match planner::plan(&parsed, &goals, args.keep_going) {
         Ok(result) => result,
         Err(e) => {
-            eprintln!("minimake: {e}");
+            eprintln!("buildgraph: {e}");
             return 2;
         }
     };
@@ -75,14 +78,14 @@ fn run(args: &cli::Args, cwd: &Path) -> i32 {
     let mut any_failed = false;
     for (goal, id) in goals.iter().zip(goal_ids.iter()) {
         match results.get::<BuildStatus>(*id) {
-            BuildStatus::UpToDate => println!("minimake: '{goal}' is up to date."),
+            BuildStatus::UpToDate => println!("buildgraph: '{goal}' is up to date."),
             BuildStatus::Built => {}
             BuildStatus::Failed => {
-                eprintln!("minimake: *** [{goal}] failed");
+                eprintln!("buildgraph: *** [{goal}] failed");
                 any_failed = true;
             }
             BuildStatus::Skipped => {
-                eprintln!("minimake: *** [{goal}] skipped due to a failed dependency");
+                eprintln!("buildgraph: *** [{goal}] skipped due to a failed dependency");
                 any_failed = true;
             }
         }

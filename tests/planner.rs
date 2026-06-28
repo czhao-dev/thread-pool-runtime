@@ -5,7 +5,7 @@ use rust_thread_pool_runtime::planner::{self, BuildStatus, PlanError};
 use rust_thread_pool_runtime::{run_graph, Runtime};
 
 fn scratch_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("minimake-planner-{tag}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("buildgraph-planner-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
