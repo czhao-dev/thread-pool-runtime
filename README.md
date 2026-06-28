@@ -5,7 +5,7 @@
 [![crossbeam-deque](https://img.shields.io/badge/crossbeam--deque-0.8-orange)](https://crates.io/crates/crossbeam-deque)
 [![criterion](https://img.shields.io/badge/criterion-0.5-orange)](https://crates.io/crates/criterion)
 
-A from-scratch task execution runtime written in Rust: a fixed-size worker pool with per-priority work-stealing queues, panic-safe task handles, cooperative cancellation, and a dependency-graph (DAG) scheduler built on top of it.
+A from-scratch task execution runtime written in Rust: a fixed-size worker pool with per-priority work-stealing queues, panic-safe task handles, cooperative cancellation, and a dependency-graph (DAG) scheduler built on top of it. The repo also includes [`minimake`](#minimake-a-mini-gnu-make-built-on-this-runtime), a small GNU Make reimplementation that uses the dependency-graph scheduler to build Makefile targets in parallel.
 
 This is not meant to replace mature libraries such as Rayon or Tokio. It's a learning-focused implementation of the mechanisms behind CPU task runtimes, job schedulers, and work-stealing execution engines — built to be read, benchmarked, and reasoned about.
 
@@ -74,7 +74,7 @@ Every queue and every steal operation moves the same concrete type, `Box<dyn FnO
 
 ### Cancellation (`cancellation.rs`)
 
-The runtime never forcibly kills a thread mid-task — doing so while it might be holding a lock or mid-destructor would be unsound. `CancellationToken` is instead a cloneable `Arc<AtomicBool>`; `spawn_cancellable` hands the task body a `CancellationContext` it can poll. Cancellation is purely cooperative: it's a suggestion the task can check on its own terms (typically inside a loop), the same model `std::sync::atomic` + a polling flag gives you in any language, just wrapped so the call site reads like a first-class runtime feature.
+The runtime never forcibly kills a thread mid-task — doing so while it might be holding a lock or mid-destructor would be unsound. `CancellationToken` is instead a shareable `Arc<AtomicBool>`; `spawn_cancellable` hands the task body a `CancellationContext` it can poll. Cancellation is purely cooperative: it's a suggestion the task can check on its own terms (typically inside a loop), the same model `std::sync::atomic` + a polling flag gives you in any language, just wrapped so the call site reads like a first-class runtime feature.
 
 ### Dependency graph (`dependency.rs`)
 
@@ -113,11 +113,42 @@ All eight pool workers; thread-per-task spawns one OS thread per task.
 ```bash
 git clone https://github.com/czhao-dev/thread-pool-runtime.git
 cd thread-pool-runtime
-cargo test                                          # 21 tests across 5 files
+cargo test                                          # 43 tests across 8 files
 cargo run --example basic_pool
 cargo bench
 cargo fmt && cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+## minimake: a mini GNU Make built on this runtime
+
+`minimake` is a from-scratch reimplementation of a small subset of GNU Make, using `TaskGraph`/`run_graph` as its parallel execution engine: it parses a Makefile into target/prerequisite rules, resolves them into a `TaskGraph` (one node per target, memoized so a dependency shared by multiple targets is only built once, with cycle detection along the way), and runs recipes through the same work-stealing `Runtime` described above.
+
+```bash
+cargo run --bin minimake -- -j4 build   # parallel build with 4 workers
+cargo run --bin minimake                # default goal, -j1 (serial, like real make)
+```
+
+Example `Makefile`:
+
+```makefile
+.PHONY: all
+all: app
+
+app: main.o utils.o
+	cc -o app main.o utils.o
+
+main.o: main.c common.h
+	cc -c main.c
+
+utils.o: utils.c common.h
+	cc -c utils.c
+```
+
+**Supported (v1 "Core" scope):** explicit rules with prerequisites and tab-indented recipes, `.PHONY` targets, mtime-based staleness checks, default goal (first non-dot target), parallel builds via `-j N` (default 1), fail-fast on a recipe error, `-k`/`--keep-going` to keep building independent branches after a failure.
+
+**Not yet supported:** variable expansion (`$(VAR)`, automatic variables like `$@`/`$<`/`$^`), pattern rules (`%.o: %.c`), `-n` dry-run, `-f` makefile path override, and Make's built-in functions (`$(wildcard ...)`, `$(shell ...)`).
+
+Implementation lives in [`src/makefile.rs`](src/makefile.rs) (parsing), [`src/planner.rs`](src/planner.rs) (rule → `TaskGraph` resolution, staleness, fail-fast/keep-going), [`src/cli.rs`](src/cli.rs) (argument parsing), and [`src/bin/minimake.rs`](src/bin/minimake.rs) (the binary entry point).
 
 ## Repository Layout
 
@@ -142,24 +173,40 @@ rust-thread-pool-runtime/
 │   ├── cancellation.rs                # CancellationToken / Context
 │   ├── dependency.rs                   # TaskGraph / run_graph
 │   ├── metrics.rs                        # runtime counters
-│   └── queue.rs                           # GlobalQueuePool benchmark baseline
+│   ├── queue.rs                           # GlobalQueuePool benchmark baseline
+│   ├── makefile.rs                         # minimake: Makefile parsing
+│   ├── planner.rs                           # minimake: rules → TaskGraph, staleness, fail-fast/-k
+│   ├── cli.rs                                # minimake: argument parsing
+│   └── bin/
+│       └── minimake.rs                        # minimake: binary entry point
 └── tests/
     ├── basic_execution.rs
     ├── shutdown.rs
     ├── cancellation.rs
     ├── work_stealing.rs
-    └── stress.rs
+    ├── stress.rs
+    ├── makefile_parser.rs       # minimake: parser tests
+    ├── planner.rs                # minimake: resolver/staleness/fail-fast tests
+    └── minimake_e2e.rs            # minimake: end-to-end binary tests
 ```
 
 ## Testing Strategy
 
-21 integration tests across five files, run with `cargo test`:
+43 integration tests across eight files, run with `cargo test`.
+
+Scheduler core (21 tests, 5 files):
 
 * **`basic_execution.rs`** — tasks run, handles deliver results, panics surface as `JoinError` without poisoning the pool, metrics stay consistent, nested spawning from inside a task completes.
 * **`shutdown.rs`** — shutdown drains in-flight work before joining, is idempotent, survives repeated create/shutdown cycles, and runs cleanly even via `Drop` if `shutdown()` is never called explicitly.
 * **`cancellation.rs`** — a running task observes cancellation and exits cooperatively; cancelling before a task starts is observed immediately; an unrelated task on a cancelled token is unaffected.
 * **`work_stealing.rs`** — other workers keep making progress while one is blocked; a 20,000-task fan-out completes and is fully accounted for in the metrics; nested fan-out from inside a task completes.
 * **`stress.rs`** — concurrent submission from 8 producer threads, long-running tasks interleaved with thousands of short ones, priority preference under saturation, dependency graphs (linear chain and 200-wide fan-out/join), and repeated pool lifecycles under load.
+
+`minimake` (22 tests, 3 files):
+
+* **`makefile_parser.rs`** — rule headers, multi-line recipes, `.PHONY` association (before or after the rule), comments/blank lines, default-goal selection, and malformed-input errors.
+* **`planner.rs`** — a dependency shared by two parents is only built once (memoization), circular dependencies are detected and named, a missing prerequisite with no rule and no file errors out, an existing file with no rule is treated as a leaf, mtime-based up-to-date / stale decisions, `.PHONY` forcing a rebuild regardless of mtimes, and a failed prerequisite causing its dependent to be skipped (checked under both fail-fast and `-k`).
+* **`minimake_e2e.rs`** — runs the compiled binary against real temp-directory Makefiles: a cold build runs every recipe, an unchanged rerun skips them all, touching a shared prerequisite rebuilds its dependents, a failing recipe exits with status 1, and a missing makefile exits with status 2.
 
 ## Design Notes
 
