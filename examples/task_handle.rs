@@ -1,4 +1,4 @@
-use rust_thread_pool_runtime::Runtime;
+use work_stealing_thread_pool::Runtime;
 
 fn main() {
     let runtime = Runtime::new(4);

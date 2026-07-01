@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use rust_thread_pool_runtime::{Priority, Runtime};
+use work_stealing_thread_pool::{Priority, Runtime};
 
 /// Floods the pool with background work, then submits a high-priority task
 /// and confirms it still completes promptly by recording the order tasks

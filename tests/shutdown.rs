@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rust_thread_pool_runtime::Runtime;
+use work_stealing_thread_pool::Runtime;
 
 #[test]
 fn shutdown_waits_for_in_flight_tasks_to_finish() {

@@ -1,16 +1,16 @@
 [package]
-name = "rust-thread-pool-runtime"
+name = "work-stealing-thread-pool"
 version = "0.1.0"
 edition = "2021"
-description = "A from-scratch work-stealing thread pool runtime in Rust with priorities, cancellation, and dependency scheduling."
+description = "A from-scratch work-stealing thread pool runtime in Rust with priorities, cancellation, panic-safe task handles, and a dependency-graph (DAG) scheduler."
 license = "MIT"
-repository = "https://github.com/czhao-dev/thread-pool-runtime"
+repository = "https://github.com/czhao-dev/work-stealing-thread-pool"
 readme = "README.md"
 keywords = ["thread-pool", "work-stealing", "concurrency", "scheduler", "runtime"]
 categories = ["concurrency", "asynchronous"]
 
 [lib]
-name = "rust_thread_pool_runtime"
+name = "work_stealing_thread_pool"
 path = "src/lib.rs"
 
 [dependencies]

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rust_thread_pool_runtime::{CancellationToken, Runtime};
+use work_stealing_thread_pool::{CancellationToken, Runtime};
 
 #[test]
 fn cancelled_tasks_observe_cancellation() {

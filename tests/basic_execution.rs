@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use rust_thread_pool_runtime::Runtime;
+use work_stealing_thread_pool::Runtime;
 
 #[test]
 fn submitted_tasks_eventually_run() {

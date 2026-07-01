@@ -1,4 +1,4 @@
-use rust_thread_pool_runtime::{run_graph, Runtime, TaskGraph};
+use work_stealing_thread_pool::{run_graph, Runtime, TaskGraph};
 
 fn parse_file(name: &str) -> usize {
     println!("parsing {name}");

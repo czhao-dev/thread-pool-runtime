@@ -20,10 +20,6 @@ mod steal;
 mod task;
 mod worker;
 
-pub mod cli;
-pub mod makefile;
-pub mod planner;
-
 pub use cancellation::{CancellationContext, CancellationToken};
 pub use dependency::{run_graph, DependencyResults, NodeId, TaskGraph};
 pub use handle::{JoinError, JoinHandle};
