@@ -4,4 +4,6 @@ function(wss_add_example name)
     wss_set_warnings(${name})
 endfunction()
 
-# Examples are added here as they're implemented in later phases.
+wss_add_example(thread_per_core)
+
+# Remaining examples are added here as they're implemented in later phases.
