@@ -112,4 +112,6 @@ RuntimeMetrics WorkStealingScheduler::metrics() const { return shared_->metrics.
 
 std::size_t WorkStealingScheduler::worker_count() const { return num_workers_; }
 
+void WorkStealingScheduler::record_panic() noexcept { shared_->metrics.record_panicked(); }
+
 } // namespace wss

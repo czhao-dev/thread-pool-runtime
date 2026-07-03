@@ -38,6 +38,12 @@ public:
     virtual void shutdown() = 0;
     virtual RuntimeMetrics metrics() const = 0;
     virtual std::size_t worker_count() const = 0;
+
+    // Called by spawn() when a task body throws, so tasks_panicked stays
+    // accurate. Needed because the exception is caught inside spawn()'s
+    // generic job wrapper, which only holds a Scheduler& — it has no other
+    // way to reach a concrete backend's private Metrics counter.
+    virtual void record_panic() noexcept = 0;
 };
 
 // Builds the Job + JoinHandle<T> machinery once, outside the virtual call,
@@ -50,7 +56,8 @@ auto spawn(Scheduler& s, F&& f, SubmitOptions opts = {}) -> JoinHandle<std::invo
     using T = std::invoke_result_t<F>;
     auto [result_setter, handle] = new_handle_pair<T>();
 
-    Job job([f = std::forward<F>(f), setter = std::move(result_setter)]() mutable {
+    Scheduler* sched = &s;
+    Job job([sched, f = std::forward<F>(f), setter = std::move(result_setter)]() mutable {
         try {
             if constexpr (std::is_void_v<T>) {
                 f();
@@ -59,6 +66,7 @@ auto spawn(Scheduler& s, F&& f, SubmitOptions opts = {}) -> JoinHandle<std::invo
                 setter.set(Result<T>::ok(f()));
             }
         } catch (...) {
+            sched->record_panic();
             setter.set(Result<T>::err(JoinError{current_exception_message(), std::current_exception()}));
         }
     });

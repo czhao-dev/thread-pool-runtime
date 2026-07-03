@@ -54,6 +54,8 @@ TEST(BasicExecutionTest, PanickingTasksReportAJoinErrorWithoutPoisoningThePool) 
     auto handle2 = spawn(scheduler, [] { return 1 + 1; });
     EXPECT_EQ(handle2.join().value(), 2);
 
+    EXPECT_EQ(scheduler.metrics().tasks_panicked, 1u);
+
     scheduler.shutdown();
 }
 
