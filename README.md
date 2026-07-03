@@ -122,27 +122,33 @@ cmake --build build-release -j
 ./build-release/benchmarks/scheduler_bench
 ```
 
-Reported times are Google Benchmark's wall-clock `Time` column; its `CPU` column only accounts for the invoking thread and undercounts multi-threaded work, so it's omitted here.
+### Methodology and how to read the numbers
+
+Google Benchmark doesn't run each case once — for each row it repeats the timed body until at least `--benchmark_min_time` (0.5s here) of cumulative wall time has elapsed, then reports the **mean per-iteration time**. That's why iteration counts vary wildly across rows and are themselves informative: `many_small_tasks/thread_per_core` ran **1,975 iterations** (each iteration cheap, ~1.5ms, so it takes many reps to fill 0.5s) while `fewer_large_tasks/single_threaded` ran only **4** (each iteration alone costs 175ms). More iterations of a cheap benchmark is not weaker evidence than fewer iterations of an expensive one — both are calibrated to the same statistical budget.
+
+The **`CPU`** column is intentionally omitted from the tables below and is worth explaining rather than just dropping silently: Google Benchmark's `CPU` time only measures the *invoking* thread — the one running the `for (auto _ : state)` loop, which for every pooled strategy here spends most of its time blocked inside `JoinHandle::join()`'s condition-variable wait, not doing CPU work. For `fewer_large_tasks/global_queue`, for instance, `Time` was 30.9ms but `CPU` was only **0.095ms** — not because the work was nearly free, but because virtually all of that 30.9ms of wall time was spent on the pool's *worker* threads grinding through eight 2-million-iteration busy loops on other cores, invisible to the benchmarking thread's own CPU accounting. `Time` (wall clock) is the number that reflects what a caller actually experiences, so it's the one reported here.
 
 | Workload | single-threaded | thread-per-task | global-queue | work-stealing | thread-per-core | fair (1 class) |
 | --- | --- | --- | --- | --- | --- | --- |
-| `many_small_tasks` (2,000 × ~2k ops) | 5.43 ms | 18.8 ms | **1.78 ms** | 3.12 ms | **1.49 ms** | 3.49 ms |
-| `fewer_large_tasks` (64 × ~2M ops) | 175 ms | 31.1 ms | 30.9 ms | 30.7 ms | 34.0 ms | 31.4 ms |
-| `uneven_durations` (500 tasks, 1-in-10 ~100x heavier) | 138 ms | 26.3 ms | 24.7 ms | 26.0 ms | **39.9 ms** | 24.8 ms |
+| `many_small_tasks` (2,000 × ~2k ops) | 5.43 ms (n=129) | 18.8 ms (n=36) | **1.78 ms** (n=836) | 3.12 ms (n=351) | **1.49 ms** (n=1975) | 3.49 ms (n=282) |
+| `fewer_large_tasks` (64 × ~2M ops) | 175 ms (n=4) | 31.1 ms (n=100) | 30.9 ms (n=100) | 30.7 ms (n=100) | 34.0 ms (n=100) | 31.4 ms (n=100) |
+| `uneven_durations` (500 tasks, 1-in-10 ~100x heavier) | 138 ms (n=5) | 26.3 ms (n=100) | 24.7 ms (n=1000) | 26.0 ms (n=1000) | **39.9 ms** (n=100) | 24.8 ms (n=1000) |
 
-| `fairness_under_class_skew` (heavy weight=4 vs. light weight=1, measured while both remain backlogged) | heavy completed | light completed | ratio |
-| --- | --- | --- | --- |
-| `fair_scheduler` | 1,606 | 402 | **3.995** |
-| `global_queue` (no fairness concept) | 1,006 | 1,005 | 1.001 |
-| `work_stealing` (no fairness concept) | 1,004 | 1,004 | 1.000 |
+(`n` = iteration count Google Benchmark chose to reach 0.5s of cumulative measurement per row.)
+
+| `fairness_under_class_skew` (heavy weight=4 vs. light weight=1, measured while both remain backlogged, n=10 each) | heavy completed | light completed | ratio | target |
+| --- | --- | --- | --- | --- |
+| `fair_scheduler` | 1,606 | 402 | **3.995** | 4.0 |
+| `global_queue` (no fairness concept) | 1,006 | 1,005 | 1.001 | — |
+| `work_stealing` (no fairness concept) | 1,004 | 1,004 | 1.000 | — |
 
 **What this shows:**
 
-* **Thread-per-task is still the clear loser for many small tasks** (18.8ms vs. 1.5–3.5ms for every pooled strategy): OS thread creation cost dominates once individual tasks are cheap — exactly the problem fixed-size pools exist to solve.
-* **`thread_per_core` wins the uniform-workload case and loses the skewed one — by design.** It's fastest on `many_small_tasks` (1.49ms, best of all six strategies: no stealing machinery, maximal cache locality) but *worst* on `uneven_durations` (39.9ms, slower than even `thread_per_task`): once a heavy task lands on a core via round-robin, nothing can rebalance it off, and that core's queue backs up behind it. This is the exact tradeoff the architecture section predicts, not a coincidence — it's the whole reason to benchmark it against a scheduler that *can* rebalance.
+* **Thread-per-task is still the clear loser for many small tasks** — 18.8ms vs. 1.5–3.5ms for every pooled strategy, a **12.6x** gap against the fastest (`thread_per_core`). OS thread creation cost dominates once individual tasks are cheap — exactly the problem fixed-size pools exist to solve — and this gap only widens as task count grows, since it's a fixed per-task cost, not an amortized one.
+* **`thread_per_core` wins the uniform-workload case and loses the skewed one — by design.** It's fastest on `many_small_tasks` (1.49ms — **3.65x** faster than single-threaded, best of all six strategies: no stealing machinery, maximal cache locality, nothing to synchronize across cores at all) but *worst* on `uneven_durations` (39.9ms — **1.6x slower** than `global_queue`'s 24.7ms on the same workload, and slower even than `thread_per_task`): once a heavy task lands on a core via round-robin, nothing can rebalance it off, and that core's queue backs up behind it while the other seven idle. This is the exact tradeoff the architecture section predicts, not a coincidence — it's the whole reason to benchmark it against a scheduler that *can* rebalance. (It's still **3.5x** faster than not parallelizing at all — losing the skew comparison doesn't mean losing to single-threaded execution.)
 * **`global_queue` remains a genuinely strong baseline**, not a strawman: it's competitive with or faster than `work_stealing` in every workload measured here, at 8 workers and these task counts. Work-stealing's advantage is about avoiding starvation under contention and skew that a single mutex doesn't reproduce cleanly in a clean, repeated-trial benchmark loop — the same finding as the original Rust benchmarks, now reproduced independently in the C++ port.
-* **For CPU-bound work large enough to amortize scheduling overhead, all five threaded strategies converge** (~31–34ms on `fewer_large_tasks`, all within a few percent of each other) — the work itself, not the scheduler, is the bottleneck there, and single-threaded execution simply doesn't have the cores to compete (175ms vs. ~31ms).
-* **`FairScheduler` achieves its actual purpose**: measured while both classes are still backlogged, the heavy class (weight 4) completes tasks at a **3.995:1** ratio against the light class (weight 1) — matching the configured weight almost exactly. `GlobalQueueScheduler` and `WorkStealingScheduler`, run through the identical submission pattern as a contrast baseline, land at 1.001:1 and 1.000:1 — neither has any concept of per-class fairness, so neither can produce anything but a coin-flip-fair split. This is the whole justification for the fourth scheduler existing, made concrete rather than asserted.
+* **For CPU-bound work large enough to amortize scheduling overhead, all five threaded strategies converge** (~31–34ms on `fewer_large_tasks`, all within a few percent of each other) — the work itself, not the scheduler, is the bottleneck there. `work_stealing`'s 30.7ms against single-threaded's 175ms is a **5.7x** speedup on 8 cores — short of the theoretical 8x because of scheduling/synchronization overhead and non-parallelizable work, consistent with the original Rust project's own finding of "~6x from 8 cores after overhead."
+* **`FairScheduler` achieves its actual purpose**: measured while both classes are still backlogged, the heavy class (weight 4) completes tasks at a **3.995:1** ratio against the light class (weight 1) — **99.9% of the configured 4:1 target**. `GlobalQueueScheduler` and `WorkStealingScheduler`, run through the identical submission pattern as a contrast baseline, land at 1.001:1 and 1.000:1 — neither has any concept of per-class fairness, so neither can produce anything but a coin-flip-fair split regardless of what weight is requested (they ignore `SubmitOptions::weight` entirely). This is the whole justification for the fourth scheduler existing, made concrete rather than asserted.
 
 ## Quick Start
 
