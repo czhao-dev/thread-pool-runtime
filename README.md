@@ -1,6 +1,5 @@
 # Work-Stealing Scheduler
 
-[![CI](https://github.com/czhao-dev/work-stealing-thread-pool/actions/workflows/rust.yml/badge.svg)](https://github.com/czhao-dev/work-stealing-thread-pool/actions/workflows/rust.yml)
 [![Rust](https://img.shields.io/badge/Rust-2021-CE412B?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![crossbeam-deque](https://img.shields.io/badge/crossbeam--deque-0.8-orange)](https://crates.io/crates/crossbeam-deque)
