@@ -14,3 +14,7 @@ FetchContent_MakeAvailable(benchmark)
 add_executable(scheduler_bench scheduler_bench.cpp)
 target_link_libraries(scheduler_bench PRIVATE wss::wss benchmark::benchmark)
 wss_set_warnings(scheduler_bench)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND WSS_IPO_SUPPORTED)
+    set_property(TARGET scheduler_bench PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
