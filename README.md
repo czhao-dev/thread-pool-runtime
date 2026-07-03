@@ -1,208 +1,271 @@
 # Work-Stealing Scheduler
 
-[![Rust](https://img.shields.io/badge/Rust-2021-CE412B?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/20)
+[![CMake](https://img.shields.io/badge/CMake-3.21%2B-064F8C?logo=cmake&logoColor=white)](https://cmake.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![crossbeam-deque](https://img.shields.io/badge/crossbeam--deque-0.8-orange)](https://crates.io/crates/crossbeam-deque)
-[![criterion](https://img.shields.io/badge/criterion-0.5-orange)](https://crates.io/crates/criterion)
+[![GoogleTest](https://img.shields.io/badge/GoogleTest-1.15-orange)](https://github.com/google/googletest)
+[![Google Benchmark](https://img.shields.io/badge/Google%20Benchmark-1.9-orange)](https://github.com/google/benchmark)
 
-A from-scratch work-stealing scheduler written in Rust: a fixed-size worker pool with per-priority work-stealing queues, panic-safe task handles, cooperative cancellation, and a dependency-graph (DAG) task scheduler built on top of it.
+A from-scratch C++20 task scheduling library: **four interchangeable scheduler backends** — work-stealing, a single mutex-guarded global queue, thread-per-core, and a CFS-inspired fair scheduler — built behind one shared `Scheduler` interface, plus panic-safe task handles, cooperative cancellation, and a benchmark suite that measures all four against each other and against two naive baselines.
 
-This is not meant to replace mature libraries such as Rayon or Tokio. It's a learning-focused implementation of the mechanisms behind CPU task runtimes, job schedulers, and work-stealing execution engines — built to be read, benchmarked, and reasoned about.
+This is not meant to replace mature libraries such as Intel TBB, folly, or Seastar. It's a learning-focused implementation of the mechanisms behind CPU task runtimes and scheduling policy — a Chase-Lev work-stealing deque, a virtual-runtime fair scheduler, thread affinity — built to be read, benchmarked, and reasoned about. (This project began as a Rust implementation of the work-stealing scheduler alone; that version is preserved at the [`rust-final`](https://github.com/czhao-dev/work-stealing-scheduler/tree/rust-final) tag.)
 
 ## Overview
 
-`work-stealing-scheduler` starts every worker thread once and keeps it alive for the life of the pool. Tasks are short-lived closures (`FnOnce() -> T + Send`) that get scheduled onto those workers through a set of work-stealing queues, one per priority level. On top of that scheduling core, the crate adds:
+`wss` starts every worker thread once and keeps it alive for the life of the scheduler. Tasks are short-lived closures scheduled through whichever backend you choose:
 
-* task submission with panic-safe result handles (`spawn`, `JoinHandle<T>`)
-* three priority classes, honored at every stage of scheduling
+* a single abstract **`Scheduler`** interface (`submit` / `shutdown` / `metrics` / `worker_count`) that all four backends implement, so callers and the benchmark suite can drive any of them polymorphically through a `Scheduler&` or `std::vector<std::unique_ptr<Scheduler>>`
+* **`WorkStealingScheduler`** — per-priority Chase-Lev work-stealing deques, one per worker, with global per-priority injectors and peer-to-peer stealing
+* **`GlobalQueueScheduler`** — a single mutex-guarded FIFO queue, the deliberately naive baseline the others are measured against
+* **`ThreadPerCoreScheduler`** — one OS thread per core, best-effort pinned, each with a private queue and **no stealing at all**
+* **`FairScheduler`** — a CFS-inspired virtual-runtime scheduler over named, weighted classes, using `std::multimap` as the dispatch-ordering structure
+* task submission with panic-safe result handles (`wss::spawn`, `JoinHandle<T>`)
+* three priority classes (honored by `WorkStealingScheduler`, optionally `ThreadPerCoreScheduler`)
 * cooperative cancellation via a shared, pollable token
-* a dependency-graph executor (`TaskGraph` / `run_graph`) for DAG-shaped workloads
-* runtime counters (submitted / completed / panicked / stolen task counts)
-* a benchmark suite comparing the work-stealing pool against three simpler execution strategies
+* runtime counters (submitted / completed / panicked / stolen)
+* a benchmark suite comparing all four backends (plus two naive baselines) across three CPU-bound workloads and a dedicated fairness workload
 
-## Why Rust
+## Why C++
 
-Thread pools are everywhere in backend systems, build systems, compilers, storage engines, and distributed services, and a good one has to balance several things at once: keep cores busy, avoid excessive thread creation, minimize scheduling overhead, avoid idle workers while work exists elsewhere, and shut down cleanly. Rust forces the implementation to be explicit about ownership, lifetimes, and thread safety while building exactly that — `Send`/`Sync` bounds on task closures, `Arc`-shared scheduler state, and panic unwinding across thread boundaries are all enforced by the type system rather than by convention.
+A scheduler has to balance the same concerns in any language — keep cores busy, avoid excessive thread creation, minimize scheduling overhead, avoid idle workers while work exists elsewhere, shut down cleanly — but C++20 changes which mechanisms are the natural ones to reach for. `std::jthread` gives RAII auto-joining workers without hand-rolled `Option<Vec<JoinHandle>>` bookkeeping. `std::atomic<T>::wait`/`notify` gives a futex-backed idle doorbell with no polling fallback required — a genuine improvement over a Condvar-plus-timeout design, not just a port of one. And because C++ has no borrow checker, a completing DAG-shaped dependency doesn't need to route through a channel to dodge a `'static` bound the way the original Rust version did — a lambda can just capture a reference directly, as long as its lifetime is provably bounded (which is exactly the kind of tradeoff this project exists to make explicit, not paper over).
+
+The cost of that freedom is that C++ won't stop you from getting a lock-free data structure subtly wrong. The [Chase-Lev deque](#chase-lev-work-stealing-deque) section below is a direct account of a real data race this project's own test suite caught under ThreadSanitizer during development, and the design decisions made to fix it.
 
 ## Architecture
 
 ```text
-                          Runtime
-                 (spawn, spawn_with_priority,
-                  spawn_cancellable, shutdown)
-                            │
-                            │ push(priority, job)
-                            ▼
-              ┌───────────────────────────┐
-              │   Injectors (1 per         │
-              │   priority: High/Normal/   │
-              │   Background)              │
-              └─────────────┬──────────────┘
-                 steal_batch_and_pop      steal_batch_and_pop
-                            │                          │
-                ┌───────────▼───────────┐  ┌───────────▼───────────┐
-                │  Worker 0              │  │  Worker N              │
-                │  local deques          │◄─┤  local deques          │
-                │  (High/Normal/Bg)      │  │  (High/Normal/Bg)      │
-                │  execute, pop()        │─►│  steal()               │
-                └────────────────────────┘  └────────────────────────┘
+                     Scheduler (abstract interface)
+              submit(Job, SubmitOptions) / shutdown()
+                    metrics() / worker_count()
+                              ▲
+      ┌───────────────┬───────┴────────┬────────────────────┐
+      │               │                │                    │
+WorkStealing     GlobalQueue     ThreadPerCore           Fair
+Scheduler        Scheduler       Scheduler              Scheduler
+(per-priority    (single mutex-  (N pinned threads,     (CFS-inspired
+ Chase-Lev        guarded FIFO    private per-core       vruntime over
+ deques +         queue, no       queues, NO             weighted
+ injectors +      stealing)       stealing at all)        classes)
+ stealing)
 ```
 
-### Scheduling core (`steal.rs`, `worker.rs`, `runtime.rs`)
+`wss::spawn(scheduler, f, opts)` and `wss::spawn_cancellable(scheduler, token, f, opts)` are free function templates, not scheduler methods: they build the `Job` + `JoinHandle<T>` machinery — including exception-catching and panic accounting — exactly once, then call the single virtual `submit()`. No backend duplicates that plumbing. `SubmitOptions` is a small struct carrying every backend-specific hint (`priority`, `core_hint`, `class_name`, `weight`); each backend reads only the fields it understands and ignores the rest.
 
-Each priority level (`High`, `Normal`, `Background`) gets its own independent set of queues, so a flood of background work can never delay a high-priority task. Concretely, that's three [`crossbeam_deque::Injector`](https://docs.rs/crossbeam-deque)s (one global, multi-producer queue per priority) and, per worker, three local single-owner deques plus their `Stealer` handles.
+## Core primitives
 
-`Runtime::spawn*` always pushes onto the appropriate priority's injector — that's the "global queue" external callers submit into. A worker looking for work runs this search, in priority order at every step:
+### `Job` (`job.hpp`)
 
-1. **Own local queues** — pop from its own High deque, then Normal, then Background.
-2. **Global injectors** — `steal_batch_and_pop` from each priority's injector in turn. This both grabs a task to run *and* moves a batch of further tasks into the worker's own local deque, which is what gives later iterations cache-friendly, contention-free access to that work.
-3. **Peer workers** — `steal()` a single task directly from another worker's local deque, again in priority order, skipping itself.
+A hand-written move-only type-erased callable (`UniqueFunction`), not `std::function`. `std::function` requires `CopyConstructible` captures — forcing every task closure's state through `shared_ptr` wrappers just to satisfy that would be a real deviation from the "one-shot task" model this project is built around. No small-buffer optimization in v1: allocation cost is one heap box per task, kept simple on purpose.
 
-This three-stage search is the standard shape of a work-stealing scheduler — the same one Rayon and Tokio's multi-threaded scheduler are built on: workers run almost entirely off their own queue, batches absorbed from the injector amortize the cost of going to shared state, and direct peer-stealing is the fallback that keeps a pool from idling while work sits unevenly distributed on another worker. Running 50,000 trivial tasks across 8 workers, **24% of tasks (12,021 of 50,000) were picked up via a direct peer steal** rather than a local pop or injector pull — concrete evidence the steal path isn't just theoretical, it's load-bearing under real submission patterns.
+### Chase-Lev work-stealing deque (`chase_lev_deque.hpp`)
 
-An idle worker doesn't spin: it waits on a `Condvar`-based doorbell (`IdleSignal`) that every push and every task completion notifies, with a 1ms timeout as a correctness fallback in case a wakeup is ever missed — this bounds worst-case scheduling latency without busy-polling.
+Implements the algorithm from Lê, Pop, Cohen & Nardell, *"Correct and Efficient Work-Stealing for Weak Memory Models"* (PPoPP 2013) — the same family of algorithm crossbeam-deque (and this project's original Rust implementation) is built on.
 
-**Shutdown and lifetime.** An `AtomicUsize` counts tasks that have been submitted but not yet completed (incremented on submit, decremented after a job runs — including any panic). A worker only exits once `shutdown` has been requested *and* that counter is zero, which means a task that spawns child tasks from inside its own body can never race a shutdown into stopping early: the counter is bumped for the child before the parent's own decrement fires. `Runtime` also shuts itself down on `Drop`, so forgetting to call `shutdown()` explicitly leaks nothing.
+**Slot representation.** Each slot stores a heap-boxed `T*`, not a `T` by value. The original algorithm — and crossbeam-deque — stores `T` in-place and relies on a carefully-justified *benign* data race: a losing thread's non-atomic read of a contested slot is formally sound under Rust's memory model given the right unsafe reasoning. Reproducing that argument for a non-trivially-copyable, move-only `T` in C++ without the same tooling to check it is a much larger undertaking than this project's scope justifies. Boxing each element instead means every slot access is a well-defined atomic pointer load/store — trading one extra heap allocation per task for the guarantee that no slot access can ever be undefined behavior.
 
-### Task handles and panics (`handle.rs`, `task.rs`)
+**A real bug, found by the tooling it was built to survive.** The first version of `push()` used a raw `atomic_thread_fence(release)` plus a *relaxed* store to the `bottom` index to publish a newly-boxed item, reasoning that the fence "covered" the slot write that preceded it. ThreadSanitizer disagreed — and was right to: TSan's race detector primarily proves soundness through matching acquire/release pairs on the *same* atomic object, and a fence protecting a *different* atomic than the one a stealer actually reads is real, valid-per-standard, but exactly the kind of subtle cross-object synchronization that's easy to get wrong and hard to verify. The fix was to make the slot's own store `release` and the stealer's own load `acquire` — a direct pair on the same atomic, provably correct and directly checkable by the tooling. `ChaseLevDequeTest.ConcurrentStealersAndOwnerNeverDuplicateOrDropItems` — 8 concurrent stealers racing an owner over 200,000 items — is what caught it; it and the rest of the concurrency-sensitive test suite now run clean under TSan and ASan/UBSan as a required gate, not an optional extra.
 
-Every queue and every steal operation moves the same concrete type, `Box<dyn FnOnce() + Send + 'static>` — a `Job`. Type erasure happens once, at `spawn` time: the closure that gets boxed wraps the user's `FnOnce() -> T` in `std::panic::catch_unwind`, and delivers `Ok(T)` or `Err(message)` through a small `Arc<Mutex<Option<Result<T, String>>>> + Condvar` pair (`JoinHandle<T>` / `ResultSetter<T>`). A panic on a worker thread is caught, recorded in the runtime's metrics, and surfaced to the caller as a normal `Result` from `.join()` — it never takes down the worker thread or the pool.
+**Memory reclamation.** Growing allocates a new, larger backing buffer and publishes it, but the *old* buffer is never freed while the deque is alive — only at destruction. This is sound because a `steal()` call can only ever be made while the deque's owning worker thread is still running; workers are joined (and their deques destroyed with them) only after shutdown, by which point no thread can hold a reference into this deque. This sidesteps the classic Chase-Lev reclamation hazard without hazard pointers or a hand-rolled epoch scheme. The cost is bounded-but-retained memory: a deque that grows from 256 to 1,000,000 entries retains about a dozen buffers total (capacity doubles each time), not one per steal.
 
-### Priority (`priority.rs`)
+### The global injector (`injector.hpp`)
 
-`Priority` is a 3-variant, `#[repr(usize)]` enum used directly as an array index everywhere (`PRIORITY_ORDER`, the three injectors, the three local deques), so picking "the next priority to check" is a fixed-size array walk with no branching on enum discriminants.
+A mutex + `std::deque<Job>` per priority level, not a lock-free MPMC structure. This matches `GlobalQueueScheduler`'s own design philosophy, and avoids reimplementing crossbeam's nontrivial segmented `Injector` for what is, by design, the *cold path*: a worker only reaches the injector once its own local deque and every peer's local deque have come up empty. `pop_batch_into(dest, max_batch)` moves a batch of jobs directly into the caller's local deque in one critical section — the same idea as crossbeam's `steal_batch_and_pop`, amortizing lock cost over several tasks and giving the destination cache-friendly, contention-free access to that work on subsequent local pops.
 
-### Cancellation (`cancellation.rs`)
+### `Result<T, JoinError>` and `JoinHandle<T>` (`result.hpp`, `join_handle.hpp`)
 
-The runtime never forcibly kills a thread mid-task — doing so while it might be holding a lock or mid-destructor would be unsound. `CancellationToken` is instead a shareable `Arc<AtomicBool>`; `spawn_cancellable` hands the task body a `CancellationContext` it can poll. Cancellation is purely cooperative: it's a suggestion the task can check on its own terms (typically inside a loop), the same model `std::sync::atomic` + a polling flag gives you in any language, just wrapped so the call site reads like a first-class runtime feature.
+C++ has no `catch_unwind`; a task body that throws is caught via `try { ... } catch (...) { ... }` and delivered through the handle rather than propagating across the scheduling boundary. Rather than rethrowing from `join()` (the `std::future`-style idiom), this project uses a hand-written `Result<T, JoinError>` variant, mirroring the original Rust API directly: `join()` stays non-throwing by default, with `rethrow_if_error()` as an escape hatch for callers who'd rather propagate via exceptions. `Result<void>` is an explicit template specialization — `std::variant<void, JoinError>` is ill-formed, so a void-returning task needs its own layout.
 
-### Dependency graph (`dependency.rs`)
+### The idle-wait doorbell (`idle_signal.hpp`)
 
-`TaskGraph` is a DAG built by `add_task` (no dependencies) and `add_task_after` (depends on previously-returned `NodeId`s). Because a `NodeId` can only ever reference a node added earlier, **cycles are impossible by construction** — there's no validation step because there's nothing to validate.
+Replaces a Condvar-plus-polling-timeout design (needed in the original Rust version to guard against a missed-wakeup race) with a `std::atomic<uint64_t>` generation counter and C++20's futex-backed `wait()`/`notify_all()`. No timeout fallback is needed at all, as long as callers follow the snapshot-before-check pattern:
 
-`run_graph` is deliberately *not* built into `Runtime` itself. It's a scheduler written entirely against the public `spawn_with_priority` API: it computes remaining-dependency counts and reverse edges, submits every node with zero dependencies, and then drives the rest from an `mpsc::Receiver` that each node's wrapper closure reports its index into on completion. Receiving a completion decrements its dependents' counters on the calling thread (no atomics needed — only one thread ever touches that count) and submits any dependent that just hit zero. This sidesteps a real borrow-checker constraint: a task spawned onto the pool must be `'static`, so a node's closure can't recursively capture `&Runtime` to spawn its own dependents from a worker thread. Routing completions back through a channel to the single thread that holds the `&Runtime` borrow (the one blocked inside `run_graph`) solves it without `unsafe` or reaching for `Arc<Runtime>` everywhere.
+```cpp
+auto gen = idle.current();                    // snapshot BEFORE the final task search
+if (auto job = find_task(...)) { run(job); continue; }
+if (should_stop()) break;
+idle.wait(gen);                                // no-op if gen already advanced past this
+```
 
-A dependent task reads its prerequisites' outputs through `DependencyResults::get::<T>`, which downcasts a type-erased `Box<dyn Any + Send>` stored per node. It's dynamic typing at the boundary in exchange for letting graph nodes return whatever type makes sense for that node — the same tradeoff build systems and job graphs with heterogeneous outputs make routinely.
+If a producer calls `notify()` any time after the snapshot, `wait()` observes a changed generation and returns immediately instead of blocking — there is no window in which a wakeup can be silently missed. This is validated directly by a multi-producer/multi-consumer stress test run under ThreadSanitizer. `GlobalQueueScheduler` deliberately does *not* adopt this doorbell, keeping a plain `std::mutex` + `std::condition_variable` instead — part of its value as a baseline is contrasting "simplest possible design" against the more sophisticated doorbell used everywhere else.
 
-### Baseline pool (`queue.rs`)
+## The four schedulers
 
-`GlobalQueuePool` is a second, intentionally simple pool: one `Mutex<VecDeque<Job>>` and a `Condvar`, no local queues, no stealing. It exists purely so the benchmark suite has something architecturally simple to measure the work-stealing pool against.
+### `WorkStealingScheduler`
+
+Each worker owns three local Chase-Lev deques (High / Normal / Background) plus a share of three global per-priority injectors. A worker looking for work runs the same three-stage search at every step, in priority order: **own local queues**, then **global injectors** (a batch pull that also seeds the local deque), then **peer workers' local deques** (a direct single-item steal). An `AtomicUsize`-equivalent pending counter — incremented on submit, decremented only after a job's body finishes running — means a task that spawns children from inside itself can never race a shutdown into stopping early.
+
+### `GlobalQueueScheduler`
+
+One `std::mutex` + `std::condition_variable` + `std::deque<Job>`. No local queues, no stealing, no priority. Exists purely so the benchmark suite has something architecturally simple to measure everything else against.
+
+### `ThreadPerCoreScheduler`
+
+*N* worker threads, each pinned best-effort to a distinct core, each with a **private** per-priority queue. A task is assigned to a core at submit time — an explicit `SubmitOptions::core_hint`, or round-robin if unset — and **never migrates afterward**. There is no stealer type at all in this backend, so `metrics().tasks_stolen` is a *structural* zero, not an empirically-observed one; `ThreadPerCoreSchedulerTest.TasksNeverMigrateFromTheirAssignedCore` proves it directly for every task in a 2,000-task run, not just on average.
+
+**Affinity is best-effort, and the README says so honestly.** On Linux, `pthread_setaffinity_np` is a hard pin, enforced by the kernel scheduler. On macOS, `thread_policy_set(THREAD_AFFINITY_POLICY)` is a *hint* the kernel scheduler is free to ignore — there is no supported hard-pinning API on macOS at all, and Apple Silicon in particular gives no guarantee whatsoever via this mechanism. Any other platform falls back to a no-op stub. Crucially, the scheduler's **correctness** invariant (a task never runs on a different logical core than the one it was assigned to) does not depend on affinity working at all — it comes entirely from software queue separation, since each worker thread only ever looks at its own core's queue. Affinity only affects whether that logical core actually stays resident on one physical core, which is a cache-locality optimization, not a correctness requirement.
+
+### `FairScheduler`
+
+A CFS-inspired virtual-runtime scheduler over named, weighted classes. Because task closures are opaque and non-preemptible — there is no way to interrupt one mid-execution the way the Linux kernel preempts a running thread — vruntime only ever advances *after* a task completes: `vruntime += elapsed_wall_seconds / weight`, measured with `steady_clock`. Dispatch always picks the class with the smallest vruntime, via `std::multimap<double, ClassId>` (per this project's explicit design goal of using an ordered structure, not a heap or a lock-free skip list).
+
+**Dispatch model: bounded staleness, multi-worker.** At most one live map entry exists per class at a time — but a class is immediately re-enqueued at its *current* vruntime as soon as a worker dequeues a task from it, if more work remains, rather than waiting for that task to actually finish. This lets several idle workers pick up the same class concurrently (good utilization) at the cost of a small, self-correcting staleness: an entry sitting in the tree can be up to `num_workers` tasks "behind" the class's true vruntime, since sibling in-flight tasks haven't completed and updated it yet. This was chosen over two simpler alternatives: strict single-flight (only one task per class in flight pool-wide) idles most workers whenever few classes are backlogged; a naive "one entry per task, frozen at submission-time vruntime" model lets a submission burst monopolize the CPU before its vruntime can rise, defeating the point of the scheduler. The staleness this design accepts instead self-corrects the next time that same entry is dispatched — it is a documented approximation, not a bug swept under the rug.
+
+**New (or reawakened) classes are seeded near the current floor, not zero.** A `min_vruntime_` floor tracks the largest vruntime any class has been dispatched at so far. A class transitioning from empty to non-empty — whether it's brand new or was previously fully drained — has its vruntime clamped up to that floor before it can be dispatched. Without this, a fresh class starting at vruntime 0 would dominate a pool where other classes have already advanced, indefinitely; `FairSchedulerTest.NewClassIsSeededNearTheCurrentFloorNotZero` checks this directly, not just as a side effect of another test.
 
 ## Benchmarks
 
-Measured with `criterion` (20 samples/benchmark) on an Apple M3 (8 cores), `rustc 1.96.0`, release profile (`opt-level = 3`, `lto = true`, `codegen-units = 1`). Each task body is a busy CPU loop seeded per-task so the optimizer can't fold repeated calls into a constant — see [`benches/scheduler_bench.rs`](benches/scheduler_bench.rs). Reproduce with `cargo bench`.
+Measured with Google Benchmark on an Apple M3 (8 cores), Apple Clang 21 (C++20), release profile (`-O3`, IPO/LTO enabled for the library and the benchmark binary — matching the original Rust profile's `opt-level = 3, lto = true`). Each task body is a busy loop seeded per-task so the optimizer can't fold repeated calls into a constant — see [`benchmarks/scheduler_bench.cpp`](benchmarks/scheduler_bench.cpp). Reproduce with:
 
-| Workload | single-threaded | thread-per-task | global-queue pool | work-stealing pool |
-| --- | --- | --- | --- | --- |
-| `many_small_tasks` (2,000 tasks × ~2k ops) | 4.96 ms | 21.6 ms | **1.40 ms** | 1.93 ms |
-| `fewer_large_tasks` (64 tasks × ~2M ops) | 161.5 ms | 27.3 ms | 27.3 ms | **27.5 ms** |
-| `uneven_durations` (500 tasks, 1-in-10 ~100x heavier) | 126.9 ms | 23.6 ms | **22.3 ms** | 22.5 ms |
-| `dependency_graph` (fan-out 200 → join, work-stealing only) | — | — | — | 0.30 ms |
+```bash
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DWSS_BUILD_BENCHMARKS=ON -DWSS_BUILD_TESTS=OFF -DWSS_BUILD_EXAMPLES=OFF
+cmake --build build-release -j
+./build-release/benchmarks/scheduler_bench
+```
 
-All eight pool workers; thread-per-task spawns one OS thread per task.
+Reported times are Google Benchmark's wall-clock `Time` column; its `CPU` column only accounts for the invoking thread and undercounts multi-threaded work, so it's omitted here.
+
+| Workload | single-threaded | thread-per-task | global-queue | work-stealing | thread-per-core | fair (1 class) |
+| --- | --- | --- | --- | --- | --- | --- |
+| `many_small_tasks` (2,000 × ~2k ops) | 5.43 ms | 18.8 ms | **1.78 ms** | 3.12 ms | **1.49 ms** | 3.49 ms |
+| `fewer_large_tasks` (64 × ~2M ops) | 175 ms | 31.1 ms | 30.9 ms | 30.7 ms | 34.0 ms | 31.4 ms |
+| `uneven_durations` (500 tasks, 1-in-10 ~100x heavier) | 138 ms | 26.3 ms | 24.7 ms | 26.0 ms | **39.9 ms** | 24.8 ms |
+
+| `fairness_under_class_skew` (heavy weight=4 vs. light weight=1, measured while both remain backlogged) | heavy completed | light completed | ratio |
+| --- | --- | --- | --- |
+| `fair_scheduler` | 1,606 | 402 | **3.995** |
+| `global_queue` (no fairness concept) | 1,006 | 1,005 | 1.001 |
+| `work_stealing` (no fairness concept) | 1,004 | 1,004 | 1.000 |
 
 **What this shows:**
 
-* **Thread-per-task is the clear loser for many small tasks** (21.6ms vs. ~1.4-1.9ms): OS thread creation costs roughly 10µs+ per thread, and with 2,000 tiny tasks that overhead dwarfs the actual work — exactly the problem fixed-size pools exist to solve.
-* **For CPU-bound work large enough to amortize scheduling overhead, all three threaded strategies converge** (~27ms for `fewer_large_tasks`, all within 1% of each other) — at that point the work itself, not the scheduler, is the bottleneck, and single-threaded execution simply doesn't have the cores to compete (161ms vs. ~27ms, roughly the expected ~6x from 8 cores after non-parallelizable overhead).
-* **The simple global-queue pool is not slower than the work-stealing pool here, and is sometimes faster** (`many_small_tasks`, `uneven_durations`). At 8 workers and these task counts, the constant overhead of crossbeam's local-deque/batch-steal machinery costs slightly more than a single mutex saves in reduced contention — a real, somewhat counter-intuitive result, and a good reminder that work stealing is a tool for *avoiding starvation under skew*, not a universal throughput win. Its advantage shows up under contention and uneven scheduling, not in `criterion`'s clean, repeated-trial loop where a single mutex rarely blocks long enough to matter. The 24% peer-steal rate measured separately (see Architecture) confirms the mechanism is active; it just isn't the bottleneck in these particular workloads.
-* **The dependency graph adds negligible overhead**: scheduling 200 fan-out tasks plus a join through `TaskGraph` takes 0.3ms, almost all of it the same per-task submission cost already paid by `many_small_tasks`.
+* **Thread-per-task is still the clear loser for many small tasks** (18.8ms vs. 1.5–3.5ms for every pooled strategy): OS thread creation cost dominates once individual tasks are cheap — exactly the problem fixed-size pools exist to solve.
+* **`thread_per_core` wins the uniform-workload case and loses the skewed one — by design.** It's fastest on `many_small_tasks` (1.49ms, best of all six strategies: no stealing machinery, maximal cache locality) but *worst* on `uneven_durations` (39.9ms, slower than even `thread_per_task`): once a heavy task lands on a core via round-robin, nothing can rebalance it off, and that core's queue backs up behind it. This is the exact tradeoff the architecture section predicts, not a coincidence — it's the whole reason to benchmark it against a scheduler that *can* rebalance.
+* **`global_queue` remains a genuinely strong baseline**, not a strawman: it's competitive with or faster than `work_stealing` in every workload measured here, at 8 workers and these task counts. Work-stealing's advantage is about avoiding starvation under contention and skew that a single mutex doesn't reproduce cleanly in a clean, repeated-trial benchmark loop — the same finding as the original Rust benchmarks, now reproduced independently in the C++ port.
+* **For CPU-bound work large enough to amortize scheduling overhead, all five threaded strategies converge** (~31–34ms on `fewer_large_tasks`, all within a few percent of each other) — the work itself, not the scheduler, is the bottleneck there, and single-threaded execution simply doesn't have the cores to compete (175ms vs. ~31ms).
+* **`FairScheduler` achieves its actual purpose**: measured while both classes are still backlogged, the heavy class (weight 4) completes tasks at a **3.995:1** ratio against the light class (weight 1) — matching the configured weight almost exactly. `GlobalQueueScheduler` and `WorkStealingScheduler`, run through the identical submission pattern as a contrast baseline, land at 1.001:1 and 1.000:1 — neither has any concept of per-class fairness, so neither can produce anything but a coin-flip-fair split. This is the whole justification for the fourth scheduler existing, made concrete rather than asserted.
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/czhao-dev/work-stealing-thread-pool.git
-cd work-stealing-thread-pool
-cargo test                                          # 21 tests across 5 files
-cargo run --example basic_pool
-cargo bench
-cargo fmt && cargo clippy --all-targets --all-features -- -D warnings
+git clone https://github.com/czhao-dev/work-stealing-scheduler.git
+cd work-stealing-scheduler
+
+cmake -S . -B build -DWSS_BUILD_TESTS=ON -DWSS_BUILD_EXAMPLES=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure    # 90 tests across 13 files
+
+./build/examples/basic_pool
+./build/examples/task_handle
+./build/examples/priority_tasks
+./build/examples/thread_per_core
+./build/examples/fair_scheduler
+
+# Release build with the benchmark suite:
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DWSS_BUILD_BENCHMARKS=ON -DWSS_BUILD_TESTS=OFF -DWSS_BUILD_EXAMPLES=OFF
+cmake --build build-release -j
+./build-release/benchmarks/scheduler_bench
+
+# Sanitizer builds (required gate for the hand-rolled concurrent primitives):
+cmake -S . -B build-tsan -DWSS_SANITIZE=thread -DCMAKE_BUILD_TYPE=Debug -DWSS_BUILD_TESTS=ON
+cmake --build build-tsan -j && ctest --test-dir build-tsan --output-on-failure
+
+cmake -S . -B build-asan -DWSS_SANITIZE=address,undefined -DCMAKE_BUILD_TYPE=Debug -DWSS_BUILD_TESTS=ON
+cmake --build build-asan -j && ctest --test-dir build-asan --output-on-failure
 ```
 
 ## Repository Layout
 
 ```text
-work-stealing-thread-pool/
-├── Cargo.toml
-├── benches/
-│   └── scheduler_bench.rs      # criterion comparison across 4 strategies
-├── examples/
-│   ├── basic_pool.rs
-│   ├── task_handle.rs
-│   ├── priority_tasks.rs
-│   └── dependency_graph.rs
-├── src/
-│   ├── lib.rs
-│   ├── runtime.rs              # public Runtime API, shutdown, metrics wiring
-│   ├── worker.rs               # worker main loop, idle doorbell
-│   ├── steal.rs                # per-priority work-stealing queues
-│   ├── task.rs                 # the type-erased Job alias
-│   ├── handle.rs               # JoinHandle / panic-safe results
-│   ├── priority.rs             # Priority enum and scan order
-│   ├── cancellation.rs         # CancellationToken / Context
-│   ├── dependency.rs           # TaskGraph / run_graph
-│   ├── metrics.rs              # runtime counters
-│   └── queue.rs                # GlobalQueuePool benchmark baseline
-└── tests/
-    ├── basic_execution.rs
-    ├── shutdown.rs
-    ├── cancellation.rs
-    ├── work_stealing.rs
-    └── stress.rs
+work-stealing-scheduler/
+├── CMakeLists.txt              # top-level: C++20, options, WSS_SANITIZE
+├── cmake/                      # Warnings.cmake, Sanitizers.cmake
+├── include/wss/
+│   ├── job.hpp                  # UniqueFunction (move-only type-erased callable)
+│   ├── result.hpp                # Result<T, JoinError>
+│   ├── join_handle.hpp            # JoinHandle<T> / ResultSetter<T>
+│   ├── priority.hpp
+│   ├── cancellation.hpp
+│   ├── metrics.hpp
+│   ├── idle_signal.hpp             # atomic-generation doorbell
+│   ├── chase_lev_deque.hpp          # header-only, Lê et al. 2013
+│   ├── injector.hpp                  # per-priority mutex+deque global queue
+│   ├── affinity.hpp                   # pin_to_core() platform facade
+│   ├── scheduler.hpp                   # Scheduler interface, SubmitOptions, spawn()
+│   ├── work_stealing_scheduler.hpp
+│   ├── global_queue_scheduler.hpp
+│   ├── thread_per_core_scheduler.hpp
+│   └── fair_scheduler.hpp
+├── src/                         # .cpp bodies (affinity_linux/macos/stub.cpp)
+├── tests/                       # GoogleTest, one binary per file, FetchContent
+├── benchmarks/                  # Google Benchmark, one binary, FetchContent
+└── examples/
+    ├── basic_pool.cpp
+    ├── task_handle.cpp
+    ├── priority_tasks.cpp
+    ├── thread_per_core.cpp
+    └── fair_scheduler.cpp
 ```
 
 ## Testing Strategy
 
-21 integration tests across five files, run with `cargo test`.
+90 tests across 13 files, run with `ctest`.
 
-* **`basic_execution.rs`** — tasks run, handles deliver results, panics surface as `JoinError` without poisoning the pool, metrics stay consistent, nested spawning from inside a task completes.
-* **`shutdown.rs`** — shutdown drains in-flight work before joining, is idempotent, survives repeated create/shutdown cycles, and runs cleanly even via `Drop` if `shutdown()` is never called explicitly.
-* **`cancellation.rs`** — a running task observes cancellation and exits cooperatively; cancelling before a task starts is observed immediately; an unrelated task on a cancelled token is unaffected.
-* **`work_stealing.rs`** — other workers keep making progress while one is blocked; a 20,000-task fan-out completes and is fully accounted for in the metrics; nested fan-out from inside a task completes.
-* **`stress.rs`** — concurrent submission from 8 producer threads, long-running tasks interleaved with thousands of short ones, priority preference under saturation, dependency graphs (linear chain and 200-wide fan-out/join), and repeated pool lifecycles under load.
+* **`primitives_test.cpp`, `chase_lev_deque_test.cpp`, `idle_signal_test.cpp`, `injector_test.cpp`** — the hand-rolled concurrent building blocks, tested in isolation before any scheduler is wired up. `ChaseLevDequeTest.ConcurrentStealersAndOwnerNeverDuplicateOrDropItems` and `IdleSignalTest.ManyProducersAndConsumersNeverMissAWakeup` are the two that specifically stress-test under TSan.
+* **`basic_execution_test.cpp`, `shutdown_test.cpp`, `cancellation_test.cpp`, `work_stealing_test.cpp`, `stress_test.cpp`** — `WorkStealingScheduler`'s behavioral contract: results delivered, panics surfaced as `JoinError` without poisoning the pool, shutdown drains in-flight work, cooperative cancellation observed, priority honored under saturation, nested spawning from inside a task, concurrent multi-thread submission.
+* **`global_queue_scheduler_test.cpp`** — the naive baseline's own contract, including a FIFO-ordering test specific to its single-queue design.
+* **`thread_per_core_scheduler_test.cpp`** — `TasksNeverMigrateFromTheirAssignedCore` proves the no-migration invariant directly (every task, not an average), plus round-robin distribution and an affinity smoke test.
+* **`fair_scheduler_test.cpp`** — equal-weight vruntime convergence, proportional share under weight skew (via progress-polling rather than fixed sleep windows, to stay robust under TSan/ASan slowdown), anti-starvation against a greedy backlogged class (via a fixed, bounded backlog rather than an unbounded producer thread, to keep the test fast and deterministic), and the new-class min-vruntime floor.
+* **`scheduler_interface_test.cpp`** — a typed GoogleTest suite that runs the same submit/join/shutdown/metrics contract against all four backends through `Scheduler&`, catching any backend that doesn't honor the shared interface.
 
 ## Design Notes
 
-**Why a fixed-size thread pool?** Spawning one OS thread per task is expensive — the `thread_per_task` benchmark above pays for this directly. A fixed-size worker pool bounds thread creation to pool startup and makes CPU usage predictable regardless of task count.
+**Why a fixed-size thread pool, always?** Spawning one OS thread per task is expensive — the `thread_per_task` benchmark result above pays for that directly, every time. A fixed-size worker pool bounds thread creation to startup and makes CPU usage predictable regardless of task count, across all four backends.
 
-**Why per-priority work stealing instead of one shared queue?** A single global queue is simple and, as the benchmarks show, often competitive — but it's a single point of contention, and it has no answer for one worker ending up starved while another sits on a backlog. Per-worker local queues plus stealing keep the common case (a worker running off its own queue) free of contention while still rebalancing when work is unevenly distributed, which is precisely the situation a single queue handles worst.
+**Why four schedulers instead of asserting work-stealing is best?** Because it isn't, unconditionally, and the benchmark numbers above prove it three different ways: `global_queue` matches or beats `work_stealing` on every workload measured; `thread_per_core` beats everything on uniform small tasks and loses to everything on skewed ones; and none of the other three can produce proportional fairness across weighted classes the way `fair_scheduler` does. A scheduler design should be measured against real, working alternatives — not assumed superior because it's more sophisticated, and not included as a strawman that loses by construction.
 
-**Why separate queues per priority instead of a priority heap?** A shared priority queue needs a lock (or a lock-free skip-list-like structure) and reintroduces exactly the contention work stealing is meant to avoid. Three independent sets of plain FIFO work-stealing queues, scanned high-to-low, get strict priority ordering without giving up any of the stealing architecture.
+**Why per-priority work stealing instead of one shared queue, for `WorkStealingScheduler` specifically?** A single global queue is simple and, as the benchmarks show, often competitive — but it's a single point of contention with no answer for one worker ending up starved while another sits on a backlog. Per-worker local queues plus stealing keep the common case (a worker running off its own queue) contention-free while still rebalancing when work is unevenly distributed — precisely the situation `thread_per_core`'s benchmark result shows a single queue *and* a no-stealing design both handle worse than work-stealing.
 
-**Why cooperative cancellation?** Forcibly stopping a thread mid-task is unsound in the presence of locks, destructors, and unfinished writes. A pollable token lets a task decide when it's safe to stop.
+**Why cooperative cancellation?** Forcibly stopping a thread mid-task is unsound in the presence of locks, destructors, and unfinished writes. A pollable token lets a task decide when it's safe to stop, on its own terms.
 
-**Why benchmark four strategies instead of asserting work stealing is best?** Because it isn't, unconditionally — these results show the global-queue pool keeping pace with (and twice beating) the work-stealing pool at this core count and these workloads. A runtime design should be measured against real alternatives, not assumed superior because it's more sophisticated.
+**Why measure fairness mid-flight instead of after full completion?** Every task submitted to any of these schedulers eventually runs — that's a liveness guarantee, not a fairness one. Waiting for a fixed backlog to fully drain and then comparing completed-task counts would show equal totals for every backend, `FairScheduler` included, because weight only affects *when* work gets done, not *whether* it does. The benchmark (and the corresponding test) instead measures completed-count share while both classes remain backlogged — the only point at which a scheduling *policy* difference is actually observable.
 
-## Rust Concepts Used
+## C++ Concepts Used
 
-* ownership and move semantics across thread boundaries
-* `Send` and `Sync` bounds on task closures and shared state
-* `Arc`, `Mutex`, `Condvar`, `AtomicBool`/`AtomicUsize`
-* `std::sync::mpsc` channels (dependency graph completion reporting)
-* lock-free work-stealing deques (`crossbeam-deque`)
-* `std::panic::catch_unwind` / `AssertUnwindSafe` for panic-safe task results
-* trait bounds for type-erased task closures (`Box<dyn FnOnce() + Send + 'static>`)
-* dynamic typing via `Box<dyn Any + Send>` and downcasting
-* benchmarking with `criterion`
+* `std::jthread` for RAII auto-joining worker threads
+* `std::atomic<T>::wait`/`notify_all` for futex-backed blocking without a hand-rolled Condvar+timeout doorbell
+* explicit memory-order reasoning (`acquire`/`release`/`seq_cst`, `atomic_thread_fence`) in the Chase-Lev deque and the fair scheduler's dispatch loop
+* move-only type erasure (`UniqueFunction`) instead of `std::function`
+* `std::variant`-based `Result<T, E>` with an explicit `void` specialization
+* polymorphism through an abstract `Scheduler` interface, with generic (`spawn`/`spawn_cancellable`) free-function templates built on top
+* `std::exception_ptr` / `std::current_exception()` for panic-safe task results
+* `std::multimap` as an ordered dispatch structure for the fair scheduler
+* platform-conditional compilation (`#if defined(__linux__)` / `__APPLE__`) for thread affinity
+* CMake `FetchContent` for GoogleTest and Google Benchmark, plus a `WSS_SANITIZE` option wired through every target for TSan/ASan/UBSan builds
 
 ## References
 
 **Foundational papers**
 
 - Blumofe, R. D. & Leiserson, C. E. (1999). Scheduling multithreaded computations by work stealing. *Journal of the ACM*, 46(5), 720–748. <https://dl.acm.org/doi/10.1145/324133.324234>
+- Lê, N. M., Pop, A., Cohen, A., & Nardell, F. Z. (2013). Correct and efficient work-stealing for weak memory models. *Proceedings of the 18th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (PPoPP '13)*, 69–80. <https://dl.acm.org/doi/10.1145/2442516.2442524>
 - Chase, D. & Lev, Y. (2005). Dynamic circular work-stealing deque. *Proceedings of the 17th Annual ACM Symposium on Parallelism in Algorithms and Architectures (SPAA '05)*, 21–28. <https://dl.acm.org/doi/10.1145/1073970.1073974>
 
-**Crates**
+**Fair scheduling**
 
-- [`crossbeam-deque`](https://docs.rs/crossbeam-deque) — lock-free work-stealing deque; the scheduling primitive this runtime is built on.
-- [`criterion`](https://bheisler.github.io/criterion.rs/book/) — statistics-driven micro-benchmarking for Rust.
-- [Rayon](https://github.com/rayon-rs/rayon) — production data-parallelism library for Rust; a reference point for work-stealing design at scale.
-- [Tokio](https://tokio.rs) — async runtime for Rust; its multi-threaded scheduler uses the same work-stealing architecture.
+- The Linux kernel's Completely Fair Scheduler (CFS) — the vruntime/min_vruntime model `FairScheduler` adapts for non-preemptible task closures. <https://docs.kernel.org/scheduler/sched-design-CFS.html>
 
-**Rust references**
+**Libraries and tooling**
 
-- [The Rust Programming Language](https://doc.rust-lang.org/book/) — authoritative guide to ownership, `Send`/`Sync`, and concurrency primitives.
-- [The Rustonomicon](https://doc.rust-lang.org/nomicon/) — the unsafe Rust guide; covers `catch_unwind`, `AssertUnwindSafe`, and the soundness requirements relevant to panic-safe task execution.
+- [Google Benchmark](https://github.com/google/benchmark) — the micro-benchmarking harness used here.
+- [GoogleTest](https://github.com/google/googletest) — the unit-testing framework used here.
+- [crossbeam-deque](https://docs.rs/crossbeam-deque) — the Chase-Lev deque implementation the original Rust version of this project was built on, and the direct reference point for this port's algorithm.
+- [Rayon](https://github.com/rayon-rs/rayon) / [Tokio](https://tokio.rs) — production work-stealing schedulers; reference points for the design this project's `WorkStealingScheduler` learns from.
+- [Seastar](https://seastar.io) / [Glommio](https://github.com/DataDog/glommio) — production thread-per-core runtimes; the reference architecture `ThreadPerCoreScheduler` is modeled on.
+
+**C++ references**
+
+- [cppreference](https://en.cppreference.com/) — `std::atomic`, memory ordering, `std::jthread`.
+- Boehm, H-J. & Adve, S. V. (2008). Foundations of the C++ concurrency memory model. *PLDI '08*. The formal basis for the acquire/release reasoning throughout the Chase-Lev deque and fair scheduler.
 
 ## License
 
