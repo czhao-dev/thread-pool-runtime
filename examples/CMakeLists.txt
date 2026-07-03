@@ -4,6 +4,8 @@ function(wss_add_example name)
     wss_set_warnings(${name})
 endfunction()
 
+wss_add_example(basic_pool)
+wss_add_example(task_handle)
+wss_add_example(priority_tasks)
 wss_add_example(thread_per_core)
-
-# Remaining examples are added here as they're implemented in later phases.
+wss_add_example(fair_scheduler)
