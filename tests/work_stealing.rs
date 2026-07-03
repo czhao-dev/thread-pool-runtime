@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use work_stealing_thread_pool::Runtime;
+use work_stealing_scheduler::Runtime;
 
 #[test]
 fn idle_workers_keep_making_progress_while_one_worker_is_busy() {

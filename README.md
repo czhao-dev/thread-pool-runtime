@@ -1,4 +1,4 @@
-# Work-Stealing Thread Pool
+# Work-Stealing Scheduler
 
 [![CI](https://github.com/czhao-dev/work-stealing-thread-pool/actions/workflows/rust.yml/badge.svg)](https://github.com/czhao-dev/work-stealing-thread-pool/actions/workflows/rust.yml)
 [![Rust](https://img.shields.io/badge/Rust-2021-CE412B?logo=rust&logoColor=white)](https://www.rust-lang.org)
@@ -6,13 +6,13 @@
 [![crossbeam-deque](https://img.shields.io/badge/crossbeam--deque-0.8-orange)](https://crates.io/crates/crossbeam-deque)
 [![criterion](https://img.shields.io/badge/criterion-0.5-orange)](https://crates.io/crates/criterion)
 
-A from-scratch task execution runtime written in Rust: a fixed-size worker pool with per-priority work-stealing queues, panic-safe task handles, cooperative cancellation, and a dependency-graph (DAG) scheduler built on top of it.
+A from-scratch work-stealing scheduler written in Rust: a fixed-size worker pool with per-priority work-stealing queues, panic-safe task handles, cooperative cancellation, and a dependency-graph (DAG) task scheduler built on top of it.
 
 This is not meant to replace mature libraries such as Rayon or Tokio. It's a learning-focused implementation of the mechanisms behind CPU task runtimes, job schedulers, and work-stealing execution engines — built to be read, benchmarked, and reasoned about.
 
 ## Overview
 
-`work-stealing-thread-pool` starts every worker thread once and keeps it alive for the life of the pool. Tasks are short-lived closures (`FnOnce() -> T + Send`) that get scheduled onto those workers through a set of work-stealing queues, one per priority level. On top of that scheduling core, the crate adds:
+`work-stealing-scheduler` starts every worker thread once and keeps it alive for the life of the pool. Tasks are short-lived closures (`FnOnce() -> T + Send`) that get scheduled onto those workers through a set of work-stealing queues, one per priority level. On top of that scheduling core, the crate adds:
 
 * task submission with panic-safe result handles (`spawn`, `JoinHandle<T>`)
 * three priority classes, honored at every stage of scheduling

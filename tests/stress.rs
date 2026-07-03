@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use work_stealing_thread_pool::{run_graph, Priority, Runtime, TaskGraph};
+use work_stealing_scheduler::{run_graph, Priority, Runtime, TaskGraph};
 
 #[test]
 fn many_concurrent_submissions_from_multiple_threads() {

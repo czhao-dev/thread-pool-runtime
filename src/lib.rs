@@ -1,4 +1,4 @@
-//! A from-scratch, work-stealing task runtime.
+//! A from-scratch, work-stealing task scheduler.
 //!
 //! The primary entry point is [`Runtime`]: a fixed-size worker pool with
 //! per-priority work-stealing queues. Built on top of it are cooperative

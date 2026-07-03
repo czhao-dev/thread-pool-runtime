@@ -1,4 +1,4 @@
-use work_stealing_thread_pool::Runtime;
+use work_stealing_scheduler::Runtime;
 
 fn main() {
     let runtime = Runtime::new(4);

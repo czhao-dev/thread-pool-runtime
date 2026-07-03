@@ -6,7 +6,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use work_stealing_thread_pool::{run_graph, GlobalQueuePool, Runtime, TaskGraph};
+use work_stealing_scheduler::{run_graph, GlobalQueuePool, Runtime, TaskGraph};
 
 /// Deterministic, allocation-free busy-work standing in for a real CPU-bound
 /// task body. `n` controls how long a single task takes to run; `seed`
