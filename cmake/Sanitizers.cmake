@@ -1,0 +1,6 @@
+function(wss_apply_sanitizers target)
+    if(NOT WSS_SANITIZE STREQUAL "")
+        target_compile_options(${target} PUBLIC -fsanitize=${WSS_SANITIZE} -fno-omit-frame-pointer -g)
+        target_link_options(${target} PUBLIC -fsanitize=${WSS_SANITIZE})
+    endif()
+endfunction()
