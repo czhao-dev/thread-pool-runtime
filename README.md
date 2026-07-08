@@ -142,20 +142,7 @@ A CFS-inspired virtual-runtime scheduler over named, weighted classes. Because t
 
 ## Benchmarks
 
-Measured with Google Benchmark on an Apple M3 (8 cores), Apple Clang 21 (C++20), release profile (`-O3`, IPO/LTO enabled for the library and the benchmark binary — matching the original Rust profile's `opt-level = 3, lto = true`). Each task body is a busy loop seeded per-task so the optimizer can't fold repeated calls into a constant — see [`benchmarks/scheduler_bench.cpp`](benchmarks/scheduler_bench.cpp). Reproduce with:
-
-```bash
-cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DWSS_BUILD_BENCHMARKS=ON -DWSS_BUILD_TESTS=OFF -DWSS_BUILD_EXAMPLES=OFF
-cmake --build build-release -j
-./build-release/benchmarks/scheduler_bench
-```
-
-The plots below are regenerated from a JSON dump of the same run, via [`benchmarks/plots/generate_plots.py`](benchmarks/plots/generate_plots.py) (matplotlib):
-
-```bash
-./build-release/benchmarks/scheduler_bench --benchmark_out=benchmarks/plots/results.json --benchmark_out_format=json
-python3 benchmarks/plots/generate_plots.py
-```
+Measured with Google Benchmark on an Apple M3 (8 cores), Apple Clang 21 (C++20), release profile (`-O3`, IPO/LTO enabled for the library and the benchmark binary — matching the original Rust profile's `opt-level = 3, lto = true`). Each task body is a busy loop seeded per-task so the optimizer can't fold repeated calls into a constant — see [`benchmarks/scheduler_bench.cpp`](benchmarks/scheduler_bench.cpp). The plots below are regenerated from a JSON dump of the same run, via [`benchmarks/plots/generate_plots.py`](benchmarks/plots/generate_plots.py) (matplotlib).
 
 ### Methodology and how to read the numbers
 
