@@ -25,11 +25,39 @@ This is not meant to replace mature libraries such as Intel TBB, folly, or Seast
 * runtime counters (submitted / completed / panicked / stolen)
 * a benchmark suite comparing all four backends (plus two naive baselines) across three CPU-bound workloads and a dedicated fairness workload
 
-## Why C++
+## Repository Layout
 
-A scheduler has to balance the same concerns in any language — keep cores busy, avoid excessive thread creation, minimize scheduling overhead, avoid idle workers while work exists elsewhere, shut down cleanly — but C++20 changes which mechanisms are the natural ones to reach for. `std::jthread` gives RAII auto-joining workers without hand-rolled `Option<Vec<JoinHandle>>` bookkeeping. `std::atomic<T>::wait`/`notify` gives a futex-backed idle doorbell with no polling fallback required — a genuine improvement over a Condvar-plus-timeout design, not just a port of one. And because C++ has no borrow checker, a completing DAG-shaped dependency doesn't need to route through a channel to dodge a `'static` bound the way the original Rust version did — a lambda can just capture a reference directly, as long as its lifetime is provably bounded (which is exactly the kind of tradeoff this project exists to make explicit, not paper over).
-
-The cost of that freedom is that C++ won't stop you from getting a lock-free data structure subtly wrong. The [Chase-Lev deque](#chase-lev-work-stealing-deque) section below is a direct account of a real data race this project's own test suite caught under ThreadSanitizer during development, and the design decisions made to fix it.
+```text
+work-stealing-scheduler/
+├── CMakeLists.txt              # top-level: C++20, options, WSS_SANITIZE
+├── cmake/                      # Warnings.cmake, Sanitizers.cmake
+├── include/wss/
+│   ├── job.hpp                  # UniqueFunction (move-only type-erased callable)
+│   ├── result.hpp                # Result<T, JoinError>
+│   ├── join_handle.hpp            # JoinHandle<T> / ResultSetter<T>
+│   ├── priority.hpp
+│   ├── cancellation.hpp
+│   ├── metrics.hpp
+│   ├── idle_signal.hpp             # atomic-generation doorbell
+│   ├── chase_lev_deque.hpp          # header-only, Lê et al. 2013
+│   ├── injector.hpp                  # per-priority mutex+deque global queue
+│   ├── affinity.hpp                   # pin_to_core() platform facade
+│   ├── scheduler.hpp                   # Scheduler interface, SubmitOptions, spawn()
+│   ├── work_stealing_scheduler.hpp
+│   ├── global_queue_scheduler.hpp
+│   ├── thread_per_core_scheduler.hpp
+│   └── fair_scheduler.hpp
+├── src/                         # .cpp bodies (affinity_linux/macos/stub.cpp)
+├── tests/                       # GoogleTest, one binary per file, FetchContent
+├── benchmarks/                  # Google Benchmark, one binary, FetchContent
+│   └── plots/                   # results.json + generate_plots.py (matplotlib) -> README PNGs
+└── examples/
+    ├── basic_pool.cpp
+    ├── task_handle.cpp
+    ├── priority_tasks.cpp
+    ├── thread_per_core.cpp
+    └── fair_scheduler.cpp
+```
 
 ## Architecture
 
@@ -194,40 +222,6 @@ cmake --build build-tsan -j && ctest --test-dir build-tsan --output-on-failure
 
 cmake -S . -B build-asan -DWSS_SANITIZE=address,undefined -DCMAKE_BUILD_TYPE=Debug -DWSS_BUILD_TESTS=ON
 cmake --build build-asan -j && ctest --test-dir build-asan --output-on-failure
-```
-
-## Repository Layout
-
-```text
-work-stealing-scheduler/
-├── CMakeLists.txt              # top-level: C++20, options, WSS_SANITIZE
-├── cmake/                      # Warnings.cmake, Sanitizers.cmake
-├── include/wss/
-│   ├── job.hpp                  # UniqueFunction (move-only type-erased callable)
-│   ├── result.hpp                # Result<T, JoinError>
-│   ├── join_handle.hpp            # JoinHandle<T> / ResultSetter<T>
-│   ├── priority.hpp
-│   ├── cancellation.hpp
-│   ├── metrics.hpp
-│   ├── idle_signal.hpp             # atomic-generation doorbell
-│   ├── chase_lev_deque.hpp          # header-only, Lê et al. 2013
-│   ├── injector.hpp                  # per-priority mutex+deque global queue
-│   ├── affinity.hpp                   # pin_to_core() platform facade
-│   ├── scheduler.hpp                   # Scheduler interface, SubmitOptions, spawn()
-│   ├── work_stealing_scheduler.hpp
-│   ├── global_queue_scheduler.hpp
-│   ├── thread_per_core_scheduler.hpp
-│   └── fair_scheduler.hpp
-├── src/                         # .cpp bodies (affinity_linux/macos/stub.cpp)
-├── tests/                       # GoogleTest, one binary per file, FetchContent
-├── benchmarks/                  # Google Benchmark, one binary, FetchContent
-│   └── plots/                   # results.json + generate_plots.py (matplotlib) -> README PNGs
-└── examples/
-    ├── basic_pool.cpp
-    ├── task_handle.cpp
-    ├── priority_tasks.cpp
-    ├── thread_per_core.cpp
-    └── fair_scheduler.cpp
 ```
 
 ## Testing Strategy
