@@ -122,11 +122,23 @@ cmake --build build-release -j
 ./build-release/benchmarks/scheduler_bench
 ```
 
+The plots below are regenerated from a JSON dump of the same run, via [`benchmarks/plots/generate_plots.py`](benchmarks/plots/generate_plots.py) (matplotlib):
+
+```bash
+./build-release/benchmarks/scheduler_bench --benchmark_out=benchmarks/plots/results.json --benchmark_out_format=json
+python3 benchmarks/plots/generate_plots.py
+```
+
 ### Methodology and how to read the numbers
 
 Google Benchmark doesn't run each case once — for each row it repeats the timed body until at least `--benchmark_min_time` (0.5s here) of cumulative wall time has elapsed, then reports the **mean per-iteration time**. That's why iteration counts vary wildly across rows and are themselves informative: `many_small_tasks/thread_per_core` ran **1,975 iterations** (each iteration cheap, ~1.5ms, so it takes many reps to fill 0.5s) while `fewer_large_tasks/single_threaded` ran only **4** (each iteration alone costs 175ms). More iterations of a cheap benchmark is not weaker evidence than fewer iterations of an expensive one — both are calibrated to the same statistical budget.
 
 The **`CPU`** column is intentionally omitted from the tables below and is worth explaining rather than just dropping silently: Google Benchmark's `CPU` time only measures the *invoking* thread — the one running the `for (auto _ : state)` loop, which for every pooled strategy here spends most of its time blocked inside `JoinHandle::join()`'s condition-variable wait, not doing CPU work. For `fewer_large_tasks/global_queue`, for instance, `Time` was 30.9ms but `CPU` was only **0.095ms** — not because the work was nearly free, but because virtually all of that 30.9ms of wall time was spent on the pool's *worker* threads grinding through eight 2-million-iteration busy loops on other cores, invisible to the benchmarking thread's own CPU accounting. `Time` (wall clock) is the number that reflects what a caller actually experiences, so it's the one reported here.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="benchmarks/plots/latency_by_workload_dark.png">
+  <img src="benchmarks/plots/latency_by_workload_light.png" alt="Grouped horizontal bar charts of wall-clock time per scheduler backend across the three workloads: many_small_tasks, fewer_large_tasks, and uneven_durations.">
+</picture>
 
 | Workload | single-threaded | thread-per-task | global-queue | work-stealing | thread-per-core | fair (1 class) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -141,6 +153,11 @@ The **`CPU`** column is intentionally omitted from the tables below and is worth
 | `fair_scheduler` | 1,606 | 402 | **3.995** | 4.0 |
 | `global_queue` (no fairness concept) | 1,006 | 1,005 | 1.001 | — |
 | `work_stealing` (no fairness concept) | 1,004 | 1,004 | 1.000 | — |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="benchmarks/plots/fairness_under_class_skew_dark.png">
+  <img src="benchmarks/plots/fairness_under_class_skew_light.png" alt="Bar chart of heavy-to-light completed-task ratio for fair_scheduler, global_queue, and work_stealing, with a dashed line at the 4.0x target.">
+</picture>
 
 **What this shows:**
 
@@ -204,6 +221,7 @@ work-stealing-scheduler/
 ├── src/                         # .cpp bodies (affinity_linux/macos/stub.cpp)
 ├── tests/                       # GoogleTest, one binary per file, FetchContent
 ├── benchmarks/                  # Google Benchmark, one binary, FetchContent
+│   └── plots/                   # results.json + generate_plots.py (matplotlib) -> README PNGs
 └── examples/
     ├── basic_pool.cpp
     ├── task_handle.cpp
