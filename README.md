@@ -29,20 +29,20 @@ This is not meant to replace mature libraries such as Intel TBB, folly, or Seast
 
 ```text
 work-stealing-scheduler/
-├── CMakeLists.txt              # top-level: C++20, options, WSS_SANITIZE
-├── cmake/                      # Warnings.cmake, Sanitizers.cmake
+├── CMakeLists.txt               # top-level: C++20, options, WSS_SANITIZE
+├── cmake/                       # Warnings.cmake, Sanitizers.cmake
 ├── include/wss/
-│   ├── job.hpp                  # UniqueFunction (move-only type-erased callable)
-│   ├── result.hpp                # Result<T, JoinError>
-│   ├── join_handle.hpp            # JoinHandle<T> / ResultSetter<T>
+│   ├── job.hpp              # UniqueFunction (move-only type-erased callable)
+│   ├── result.hpp           # Result<T, JoinError>
+│   ├── join_handle.hpp      # JoinHandle<T> / ResultSetter<T>
 │   ├── priority.hpp
 │   ├── cancellation.hpp
 │   ├── metrics.hpp
-│   ├── idle_signal.hpp             # atomic-generation doorbell
-│   ├── chase_lev_deque.hpp          # header-only, Lê et al. 2013
-│   ├── injector.hpp                  # per-priority mutex+deque global queue
-│   ├── affinity.hpp                   # pin_to_core() platform facade
-│   ├── scheduler.hpp                   # Scheduler interface, SubmitOptions, spawn()
+│   ├── idle_signal.hpp      # atomic-generation doorbell
+│   ├── chase_lev_deque.hpp  # header-only, Lê et al. 2013
+│   ├── injector.hpp         # per-priority mutex+deque global queue
+│   ├── affinity.hpp         # pin_to_core() platform facade
+│   ├── scheduler.hpp        # Scheduler interface, SubmitOptions, spawn()
 │   ├── work_stealing_scheduler.hpp
 │   ├── global_queue_scheduler.hpp
 │   ├── thread_per_core_scheduler.hpp
@@ -69,10 +69,10 @@ work-stealing-scheduler/
       ┌───────────────┬───────┴────────┬────────────────────┐
       │               │                │                    │
 WorkStealing     GlobalQueue     ThreadPerCore           Fair
-Scheduler        Scheduler       Scheduler              Scheduler
-(per-priority    (single mutex-  (N pinned threads,     (CFS-inspired
- Chase-Lev        guarded FIFO    private per-core       vruntime over
- deques +         queue, no       queues, NO             weighted
+Scheduler        Scheduler       Scheduler               Scheduler
+(per-priority    (single mutex-  (N pinned threads,      (CFS-inspired
+ Chase-Lev        guarded FIFO    private per-core        vruntime over
+ deques +         queue, no       queues, NO              weighted
  injectors +      stealing)       stealing at all)        classes)
  stealing)
 ```
