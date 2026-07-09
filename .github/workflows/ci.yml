@@ -30,4 +30,4 @@ jobs:
         run: cmake --build ${{ matrix.build_dir }} -j
 
       - name: Test
-        run: ctest --test-dir ${{ matrix.build_dir }} --output-on-failure
+        run: ctest --test-dir ${{ matrix.build_dir }} --output-on-failure --timeout 60
