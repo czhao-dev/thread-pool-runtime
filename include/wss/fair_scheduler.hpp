@@ -99,6 +99,17 @@ private:
         bool has_entry = false;
         std::uint64_t completed = 0;
         double total_busy_seconds = 0.0;
+
+        // Explicit: libstdc++'s deque copy constructor isn't SFINAE-friendly, so
+        // is_copy_constructible<ClassState> reports true despite the move-only
+        // Job in `runnable`; that plus deque's move ctor not being noexcept in
+        // libstdc++ makes vector<ClassState> reallocation pick the (broken) copy
+        // path under GCC. Deleting copy and forcing move noexcept fixes it.
+        ClassState() = default;
+        ClassState(const ClassState&) = delete;
+        ClassState& operator=(const ClassState&) = delete;
+        ClassState(ClassState&&) noexcept = default;
+        ClassState& operator=(ClassState&&) noexcept = default;
     };
 
     ClassId find_or_create_class_locked(const std::string& name, double weight);
