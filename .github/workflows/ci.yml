@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debug
+            build_dir: build
+            cmake_args: -DCMAKE_BUILD_TYPE=Debug -DWSS_BUILD_TESTS=ON -DWSS_BUILD_EXAMPLES=ON
+          - name: tsan
+            build_dir: build-tsan
+            cmake_args: -DCMAKE_BUILD_TYPE=Debug -DWSS_SANITIZE=thread -DWSS_BUILD_TESTS=ON
+          - name: asan-ubsan
+            build_dir: build-asan
+            cmake_args: -DCMAKE_BUILD_TYPE=Debug -DWSS_SANITIZE=address,undefined -DWSS_BUILD_TESTS=ON
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B ${{ matrix.build_dir }} ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build ${{ matrix.build_dir }} -j
+
+      - name: Test
+        run: ctest --test-dir ${{ matrix.build_dir }} --output-on-failure
