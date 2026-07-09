@@ -14,12 +14,20 @@ jobs:
           - name: debug
             build_dir: build
             cmake_args: -DCMAKE_BUILD_TYPE=Debug -DWSS_BUILD_TESTS=ON -DWSS_BUILD_EXAMPLES=ON
+            test_timeout: 60
           - name: tsan
             build_dir: build-tsan
             cmake_args: -DCMAKE_BUILD_TYPE=Debug -DWSS_SANITIZE=thread -DWSS_BUILD_TESTS=ON
+            # GCC's ThreadSanitizer runtime scales poorly under the heavy thread
+            # churn this suite does (a fresh worker pool per typed-test case) and
+            # its internal bookkeeping locks become a bottleneck under shared-
+            # runner contention -- individual trivial tests can occasionally spike
+            # well past what they'd take standalone, unrelated to any actual race.
+            test_timeout: 180
           - name: asan-ubsan
             build_dir: build-asan
             cmake_args: -DCMAKE_BUILD_TYPE=Debug -DWSS_SANITIZE=address,undefined -DWSS_BUILD_TESTS=ON
+            test_timeout: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -30,4 +38,4 @@ jobs:
         run: cmake --build ${{ matrix.build_dir }} -j
 
       - name: Test
-        run: ctest --test-dir ${{ matrix.build_dir }} --output-on-failure --timeout 60
+        run: ctest --test-dir ${{ matrix.build_dir }} --output-on-failure --timeout ${{ matrix.test_timeout }}
