@@ -90,7 +90,6 @@ void WorkStealingScheduler::submit(Job job, const SubmitOptions& opts) {
     Job wrapped([shared, job = std::move(job)]() mutable {
         job();
         shared->pending.fetch_sub(1, std::memory_order_seq_cst);
-        shared->metrics.record_completed();
         shared->idle.notify();
     });
 
@@ -113,5 +112,7 @@ RuntimeMetrics WorkStealingScheduler::metrics() const { return shared_->metrics.
 std::size_t WorkStealingScheduler::worker_count() const { return num_workers_; }
 
 void WorkStealingScheduler::record_panic() noexcept { shared_->metrics.record_panicked(); }
+
+void WorkStealingScheduler::record_completed() noexcept { shared_->metrics.record_completed(); }
 
 } // namespace wss

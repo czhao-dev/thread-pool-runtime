@@ -42,6 +42,7 @@ public:
     RuntimeMetrics metrics() const override;
     std::size_t worker_count() const override;
     void record_panic() noexcept override;
+    void record_completed() noexcept override;
 
 private:
     // State shared between this handle and every worker thread.

@@ -44,6 +44,16 @@ public:
     // generic job wrapper, which only holds a Scheduler& — it has no other
     // way to reach a concrete backend's private Metrics counter.
     virtual void record_panic() noexcept = 0;
+
+    // Called by spawn() once a task body has returned or thrown, strictly
+    // before the JoinHandle's result is published. Backends must not record
+    // completion themselves after running the wrapped Job — that leaves a
+    // window where join() has already returned (the result setter notifies
+    // its condition variable independently of this counter) but
+    // tasks_completed hasn't been incremented yet, so a caller reading
+    // metrics() right after join() can observe an undercount. Sanitizer
+    // timing perturbation is what makes this window observable in practice.
+    virtual void record_completed() noexcept = 0;
 };
 
 // Builds the Job + JoinHandle<T> machinery once, outside the virtual call,
@@ -61,12 +71,16 @@ auto spawn(Scheduler& s, F&& f, SubmitOptions opts = {}) -> JoinHandle<std::invo
         try {
             if constexpr (std::is_void_v<T>) {
                 f();
+                sched->record_completed();
                 setter.set(Result<T>::ok());
             } else {
-                setter.set(Result<T>::ok(f()));
+                auto value = f();
+                sched->record_completed();
+                setter.set(Result<T>::ok(std::move(value)));
             }
         } catch (...) {
             sched->record_panic();
+            sched->record_completed();
             setter.set(Result<T>::err(JoinError{current_exception_message(), std::current_exception()}));
         }
     });

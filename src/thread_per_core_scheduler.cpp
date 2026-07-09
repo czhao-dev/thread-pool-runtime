@@ -52,7 +52,6 @@ void ThreadPerCoreScheduler::worker_loop(std::size_t core_index) {
             }
         }
         job();
-        metrics_.record_completed();
     }
 }
 
@@ -86,5 +85,7 @@ RuntimeMetrics ThreadPerCoreScheduler::metrics() const { return metrics_.snapsho
 std::size_t ThreadPerCoreScheduler::worker_count() const { return num_cores_; }
 
 void ThreadPerCoreScheduler::record_panic() noexcept { metrics_.record_panicked(); }
+
+void ThreadPerCoreScheduler::record_completed() noexcept { metrics_.record_completed(); }
 
 } // namespace wss

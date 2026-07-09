@@ -56,7 +56,6 @@ Job FairScheduler::wrap_with_bookkeeping(Job job) {
     return Job([this, job = std::move(job)]() mutable {
         job();
         pending_.fetch_sub(1, std::memory_order_seq_cst);
-        metrics_.record_completed();
         idle_.notify();
     });
 }
@@ -144,6 +143,8 @@ RuntimeMetrics FairScheduler::metrics() const { return metrics_.snapshot(); }
 std::size_t FairScheduler::worker_count() const { return num_workers_; }
 
 void FairScheduler::record_panic() noexcept { metrics_.record_panicked(); }
+
+void FairScheduler::record_completed() noexcept { metrics_.record_completed(); }
 
 std::vector<FairScheduler::ClassSnapshot> FairScheduler::fairness_snapshot() const {
     std::lock_guard<std::mutex> lock(mu_);

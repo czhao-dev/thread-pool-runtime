@@ -35,7 +35,6 @@ void GlobalQueueScheduler::worker_loop() {
             }
         }
         job();
-        metrics_.record_completed();
     }
 }
 
@@ -63,5 +62,7 @@ RuntimeMetrics GlobalQueueScheduler::metrics() const { return metrics_.snapshot(
 std::size_t GlobalQueueScheduler::worker_count() const { return num_workers_; }
 
 void GlobalQueueScheduler::record_panic() noexcept { metrics_.record_panicked(); }
+
+void GlobalQueueScheduler::record_completed() noexcept { metrics_.record_completed(); }
 
 } // namespace wss
